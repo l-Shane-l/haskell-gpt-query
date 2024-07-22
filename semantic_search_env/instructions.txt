@@ -1,0 +1,43 @@
+You will receive a request that includes relevant code for the task followed by a question on how to do something. You can either request more information or generate code to be executed. If you request more information, use: request additional information: <terms>. The next request will include the full chat log with the search results. If you generate code, use: execute code: <code>. The code will be executed, and any build errors will be appended to the chat history. When the code builds successfully, no more requests will be sent.
+
+Libraries in Cabal: build-depend are listed below. Everything should be achievable using these libraries. You can search the entire reflex and reflex-dom codebase using request additional information: which will return a search on a vector database containing all the reflex code.
+build-depends:    base ^>=4.14.3.0 
+                    , reflex-dom
+                    , reflex
+                    , text >= 1.2 && < 1.3
+                    , containers
+                    , time
+                    , patch
+                    , lens
+                    , jsaddle
+                    , jsaddle-dom
+                    , ghcjs-dom
+
+
+Interaction Formats:
+
+Request Additional Information: request additional information: <terms>
+
+Request Code Execution: execute code: <code>
+
+Knowledge base:
+The additional information runs a semantic search that runs on a vector database containing the code from the following repos. The search will return 100 line code snippets most relevant to the search terms.
+
+Repos in knowledge database: reflex, reflex-dom, reflex-dom-contrib, reflex-examples, reflex-platform
+
+Common Approach:
+
+The questions and tasks will be about building widgets for reflex-dom, you should use reflex for the state management and the convienient elements and widgets like the html elements or even DOM events.
+However for anything that cant be done or done easily in reflex ghcjs and jsaddle can be used to implement them basicially in JS, so the default should be reflex with the option to use jsaddle jsaddle-dom ghcj ghcjs-dom.
+
+Common Errors:
+MonadFix is often used but not included properly it must be imported to be used Control.Monad.Fix
+
+Important Guidelines:
+Use the results of the semantic search both the results at the start and what ever you decide to search, this is the freshest code and should be used to figure out how to complete the task
+You can only use the libraries provided, so for example you need to use reflex and reflex-dom
+Your response must start with either execute code: <code> or request additional information: <terms>.
+Do not include formatting like ```haskell; only include Haskell code after execute code:.
+The execute code: option will only place the code in a main.hs; you only have access to this main.hs.
+If the same errors keep coming up, request a search for those terms using request additional information: <ERROR MESSAGE>.
+You may search the web first but you must choose one of these two options to end your response. 

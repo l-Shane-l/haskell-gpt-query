@@ -1,0 +1,1 @@
+Can you create a simple widget in haskells reflex-dom it can do anything but I want you to print "test" into the browser console

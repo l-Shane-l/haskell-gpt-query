@@ -1,0 +1,7 @@
+{
+  "directory": "/home/shane/reflex-scholar/",
+  "api_key": "sk-proj-voYLR0eCwq1RUbpeVurST3BlbkFJpbiaTLwfOzCzlIqRrIHk",
+  "log_file": "chat_history.txt",
+  "top_k": 1,
+  "semantic_prompt": "reflex button drag drop move movable dropable "
+}

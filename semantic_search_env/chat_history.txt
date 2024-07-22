@@ -1,0 +1,3556 @@
+2024-07-23 00:37:12.497737 - Sent: liftIO
+Results:
+Search Terms: liftIO
+Result 1:
+Chunk index: 25
+Distance: 1.3096442222595215
+Code Chunk:
+        _ <- liftIO $ atomically $ tryTakeTMVar isOpen
+        liftIO $ writeIORef currentSocketRef Nothing
+        when (_webSocketConfig_reconnect config) $ forkJSM $ do
+          liftIO $ threadDelay 1000000
+          start
+      start = do
+        ws <- newWebSocket url (_webSocketConfig_protocols config) (onRawMessage >=> liftIO . onMessage) (liftIO onOpen) (liftIO onError) onClose
+        liftIO $ writeIORef currentSocketRef $ Just ws
+        return ()
+  performEvent_ . (liftJSM start <$) =<< getPostBuild
+  performEvent_ $ ffor (_webSocketConfig_send config) $ \payloads -> forM_ payloads $ \payload ->
+    liftIO $ atomically $ writeTQueue payloadQueue payload
+  performEvent_ $ ffor (_webSocketConfig_close config) $ \(code,reason) -> liftJSM $ do
+    mws <- liftIO $ readIORef currentSocketRef
+    case mws of
+      Nothing -> return ()
+      Just ws -> closeWebSocket ws (fromIntegral code) reason
+
+  ctx <- askJSM
+  _ <- liftIO $ forkIO $ forever $ do
+    payload <- atomically $ do
+      pl     <- readTQueue payloadQueue
+      open   <- tryReadTMVar isOpen
+      if isJust open then return pl else retry
+
+    mws <- liftIO $ readIORef currentSocketRef
+    success <- case mws of
+      Nothing -> return False
+      Just ws -> flip runJSM ctx $ do
+        rs <- getReadyState $ unWebSocket ws
+        if rs == 1
+          then (webSocketSend ws payload >> return True) `JS.catch` (\(_ :: SomeException) -> return False)
+          else return False
+    unless success $ atomically $ unGetTQueue payloadQueue payload
+  return $ RawWebSocket eRecv eOpen eError eClose
+
+textWebSocket :: (IsWebSocketMessage a, MonadJSM m, MonadJSM (Performable m), PostBuild t m, TriggerEvent t m, PerformEvent t m, MonadHold t m, Reflex t) => Text -> WebSocketConfig t a -> m (RawWebSocket t Text)
+textWebSocket url cfg = webSocket' url cfg (either (return . decodeUtf8) fromJSValUnchecked)
+
+jsonWebSocket :: (ToJSON a, FromJSON b, MonadJSM m, MonadJSM (Performable m), PostBuild t m, TriggerEvent t m, PerformEvent t m, MonadHold t m, Reflex t) => Text -> WebSocketConfig t a -> m (RawWebSocket t (Maybe b))
+jsonWebSocket url cfg = do
+  ws <- textWebSocket url $ cfg { _webSocketConfig_send = fmap (decodeUtf8 . toStrict . encode) <$> _webSocketConfig_send cfg }
+  return ws { _webSocket_recv = jsonDecode . textToJSString <$> _webSocket_recv ws }
+
+forkJSM :: JSM () -> JSM ()
+forkJSM a = do
+  jsm <- askJSM
+  void $ liftIO $ forkIO $ runJSM a jsm
+
+#ifdef USE_TEMPLATE_HASKELL
+makeLensesWith (lensRules & simpleLenses .~ True) ''WebSocketConfig
+makeLensesWith (lensRules & simpleLenses .~ True) ''RawWebSocket
+#else
+
+webSocketConfig_send :: Lens' (WebSocketConfig t a) (Event t [a])
+webSocketConfig_send f (WebSocketConfig x1 x2 x3 x4) = (\y -> WebSocketConfig y x2 x3 x4) <$> f x1
+{-# INLINE webSocketConfig_send #-}
+
+webSocketConfig_close :: Lens' (WebSocketConfig t a) (Event t (Word, Text))
+webSocketConfig_close f (WebSocketConfig x1 x2 x3 x4) = (\y -> WebSocketConfig x1 y x3 x4) <$> f x2
+{-# INLINE webSocketConfig_close #-}
+
+webSocketConfig_reconnect :: Lens' (WebSocketConfig t a) Bool
+webSocketConfig_reconnect f (WebSocketConfig x1 x2 x3 x4) = (\y -> WebSocketConfig x1 x2 y x4) <$> f x3
+{-# INLINE webSocketConfig_reconnect #-}
+
+webSocketConfig_protocols :: Lens' (WebSocketConfig t a) [Text]
+webSocketConfig_protocols f (WebSocketConfig x1 x2 x3 x4) = (\y -> WebSocketConfig x1 x2 x3 y) <$> f x4
+{-# INLINE webSocketConfig_protocols #-}
+
+webSocket_recv :: Lens' (RawWebSocket t a) (Event t a)
+webSocket_recv f (RawWebSocket x1 x2 x3 x4) = (\y -> RawWebSocket y x2 x3 x4) <$> f x1
+{-# INLINE webSocket_recv #-}
+
+webSocket_open :: Lens' (RawWebSocket t a) (Event t ())
+webSocket_open f (RawWebSocket x1 x2 x3 x4) = (\y -> RawWebSocket x1 y x3 x4) <$> f x2
+{-# INLINE webSocket_open #-}
+
+webSocket_error :: Lens' (RawWebSocket t a) (Event t ())
+webSocket_error f (RawWebSocket x1 x2 x3 x4) = (\y -> RawWebSocket x1 x2 y x4) <$> f x3
+{-# INLINE webSocket_error #-}
+
+webSocket_close :: Lens' (RawWebSocket t a) (Event t (Bool, Word, Text))
+webSocket_close f (RawWebSocket x1 x2 x3 x4) = (\y -> RawWebSocket x1 x2 x3 y) <$> f x4
+{-# INLINE webSocket_close #-}
+
+#endif
+
+--------------------------------------------------------------------------------
+
+2024-07-23 00:37:34.891383 - LLM Prompt: I have the following haskell code, it was suppose to print to the console but it just is not. 
+
+can you instead implement reflex Dynamic with text and put this in a widget and have the text update with logs from the events firing
+
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
+
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Data.Maybe (fromMaybe)
+import qualified GHCJS.DOM.DataTransfer as DOM
+import qualified GHCJS.DOM.Element as DOM
+import qualified GHCJS.DOM.EventM as DOM
+import qualified GHCJS.DOM.GlobalEventHandlers as DOM
+import qualified GHCJS.DOM.HTMLElement as DOM
+import qualified GHCJS.DOM.MouseEvent as DOM
+import qualified GHCJS.DOM.Types as DOM (uncheckedCastTo)
+import Language.Javascript.JSaddle
+import Reflex.Dom
+
+main :: IO ()
+main = mainWidget app
+
+app :: (DomBuilder t m, Prerender t m, MonadIO (Performable m)) => m ()
+app = do
+  -- Set up two draggable items
+  prerender_ blank $ do
+    draggable item1 "a picture"
+    draggable item2 "some code"
+  -- Set up the drop zone and handle drag events
+  out <- handleDragEvents
+  return ()
+
+-- Define the first draggable item (an image)
+item1 :: DomBuilder t m => m (Element EventResult (DomBuilderSpace m) t, ())
+item1 = elAttr' "div" ("draggable" =: "true") $ text "This is a draggable div"
+
+-- Define the second draggable item (a code snippet)
+item2 :: DomBuilder t m => m (Element EventResult (DomBuilderSpace m) t, ())
+item2 =
+  elAttr'
+    "pre"
+    ( "draggable" =: "true"
+        <> "style" =: "-moz-user-select:none;-ms-user-select:none;-webkit-user-select:none;user-select:none;"
+    )
+    $ text "main = putStrLn \"Hello world!\""
+
+-- Function to make an element draggable and attach data to it
+draggable ::
+  ( DomBuilderSpace m ~ GhcjsDomSpace,
+    TriggerEvent t m,
+    MonadJSM m,
+    PerformEvent t m,
+    MonadIO (Performable m)
+  ) =>
+  m (Element EventResult (DomBuilderSpace m) t, ()) ->
+  String ->
+  m ()
+draggable elmnt attachment = do
+  dragsite <- fst <$> elmnt
+  dragStartEvent <- wrapDomEvent
+    (DOM.uncheckedCastTo DOM.HTMLElement $ _element_raw dragsite)
+    (`DOM.on` DOM.dragStart)
+    $ do
+      dt <-
+        fromMaybe (error "no dt?")
+          <$> (DOM.getDataTransfer =<< DOM.event)
+      liftIO $ putStrLn "Drag start event triggered"
+      DOM.setEffectAllowed dt ("all" :: JSString)
+      DOM.setDropEffect dt ("move" :: JSString)
+      DOM.setData
+        dt
+        ("application/x-reflex-description" :: JSString)
+        attachment
+  performEvent_ $ liftIO (putStrLn "Drag started") <$ dragStartEvent
+  return ()
+
+-- Function to handle drag events in the drop zone
+handleDragEvents ::
+  ( DomBuilder t m,
+    Prerender t m,
+    MonadIO (Performable m)
+  ) =>
+  m ()
+handleDragEvents = prerender_ (return ()) $ do
+  let ddEvent ::
+        (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a) ->
+        DOM.EventM e DOM.MouseEvent a
+      ddEvent op = do
+        dt <-
+          fromMaybe (error "no DT?")
+            <$> (DOM.getDataTransfer =<< DOM.event)
+        op dt
+      ddEvent_ ::
+        DOM.EventM e DOM.MouseEvent () ->
+        DOM.EventM e DOM.MouseEvent ()
+      ddEvent_ op = ddEvent (const op)
+
+  rec -- Handle drag enter event to indicate the drop zone is active
+      dragEnterEvent <-
+        wrapDomEvent
+          dsHTMLel
+          (`DOM.on` DOM.dragEnter)
+          (ddEvent_ DOM.preventDefault)
+      performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+
+      -- Handle drag leave event to revert the drop zone style
+      dragLeaveEvent <-
+        wrapDomEvent
+          dsHTMLel
+          (`DOM.on` DOM.dragLeave)
+          (ddEvent_ $ return ())
+      performEvent_ $ liftIO (putStrLn "Drag leave") <$ dragLeaveEvent
+
+      -- Define the drop zone
+      dropsite <- fst <$> elDynAttr' "div" dropsiteAttrs (dynText dropText)
+      let dsHTMLel = DOM.uncheckedCastTo DOM.HTMLElement $ _element_raw dropsite
+      inDrop <-
+        holdDyn False $
+          leftmost
+            [ True <$ dragEnterEvent,
+              False <$ dragLeaveEvent,
+              False <$ dropEvent
+            ]
+      dropsiteAttrs <- return . ffor inDrop $ \case
+        True -> "style" =: "border:1em solid blue;padding:2em;margin:2em;background-color:green;"
+        False -> "style" =: "border:1em solid blue;padding:2em;margin:2em;"
+
+      -- Handle drag over event to allow dropping
+      dragOverEvent <-
+        wrapDomEvent
+          dsHTMLel
+          (`DOM.on` DOM.dragOver)
+          (ddEvent_ DOM.preventDefault)
+      performEvent_ $ liftIO (putStrLn "Drag over") <$ dragOverEvent
+
+      -- Handle drop event to capture dropped data
+      dropEvent <- wrapDomEvent dsHTMLel (`DOM.on` DOM.drop) $
+        ddEvent $ \dt -> do
+          DOM.preventDefault
+          liftIO $ putStrLn "Drop event triggered"
+          DOM.getData dt ("application/x-reflex-description" :: String)
+      performEvent_ $ liftIO (putStrLn "Dropped") <$ dropEvent
+
+      dropText <- holdDyn "Drop here" $ fmap ("Dropped " <>) dropEvent
+  return ()
+
+GPT-4 Response: To implement a `Dynamic` text that updates with logs from the events firing, we can use `Dynamic` and `Event` from Reflex to manage the state and update the text accordingly. Here is the updated code:
+
+execute code:
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
+
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Data.Maybe (fromMaybe)
+import qualified GHCJS.DOM.DataTransfer as DOM
+import qualified GHCJS.DOM.Element as DOM
+import qualified GHCJS.DOM.EventM as DOM
+import qualified GHCJS.DOM.GlobalEventHandlers as DOM
+import qualified GHCJS.DOM.HTMLElement as DOM
+import qualified GHCJS.DOM.MouseEvent as DOM
+import qualified GHCJS.DOM.Types as DOM (uncheckedCastTo)
+import Language.Javascript.JSaddle
+import Reflex.Dom
+
+main :: IO ()
+main = mainWidget app
+
+app :: (DomBuilder t m, Prerender t m, MonadIO (Performable m), PostBuild t m) => m ()
+app = do
+  -- Set up two draggable items
+  prerender_ blank $ do
+    draggable item1 "a picture"
+    draggable item2 "some code"
+  -- Set up the drop zone and handle drag events
+  out <- handleDragEvents
+  -- Display the logs
+  el "div" $ dynText out
+  return ()
+
+-- Define the first draggable item (an image)
+item1 :: DomBuilder t m => m (Element EventResult (DomBuilderSpace m) t, ())
+item1 = elAttr' "div" ("draggable" =: "true") $ text "This is a draggable div"
+
+-- Define the second draggable item (a code snippet)
+item2 :: DomBuilder t m => m (Element EventResult (DomBuilderSpace m) t, ())
+item2 =
+  elAttr'
+    "pre"
+    ( "draggable" =: "true"
+        <> "style" =: "-moz-user-select:none;-ms-user-select:none;-webkit-user-select:none;user-select:none;"
+    )
+    $ text "main = putStrLn \"Hello world!\""
+
+-- Function to make an element draggable and attach data to it
+draggable ::
+  ( DomBuilderSpace m ~ GhcjsDomSpace,
+    TriggerEvent t m,
+    MonadJSM m,
+    PerformEvent t m,
+    MonadIO (Performable m)
+  ) =>
+  m (Element EventResult (DomBuilderSpace m) t, ()) ->
+  String ->
+  m ()
+draggable elmnt attachment = do
+  dragsite <- fst <$> elmnt
+  dragStartEvent <- wrapDomEvent
+    (DOM.uncheckedCastTo DOM.HTMLElement $ _element_raw dragsite)
+    (`DOM.on` DOM.dragStart)
+    $ do
+      dt <-
+        fromMaybe (error "no dt?")
+          <$> (DOM.getDataTransfer =<< DOM.event)
+      liftIO $ putStrLn "Drag start event triggered"
+      DOM.setEffectAllowed dt ("all" :: JSString)
+      DOM.setDropEffect dt ("move" :: JSString)
+      DOM.setData
+        dt
+        ("application/x-reflex-description" :: JSString)
+        attachment
+  performEvent_ $ liftIO (putStrLn "Drag started") <$ dragStartEvent
+  return ()
+
+-- Function to handle drag events in the drop zone
+handleDragEvents ::
+  ( DomBuilder t m,
+    Prerender t m,
+    MonadIO (Performable m),
+    PostBuild t m
+  ) =>
+  m (Dynamic t String)
+handleDragEvents = prerender (return $ constDyn "") $ do
+  let ddEvent ::
+        (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a) ->
+        DOM.EventM e DOM.MouseEvent a
+      ddEvent op = do
+        dt <-
+          fromMaybe (error "no DT?")
+            <$> (DOM.getDataTransfer =<< DOM.event)
+        op dt
+      ddEvent_ ::
+        DOM.EventM e DOM.MouseEvent () ->
+        DOM.EventM e DOM.MouseEvent ()
+      ddEvent_ op = ddEvent (const op)
+
+  rec -- Handle drag enter event to indicate the drop zone is active
+      dragEnterEvent <-
+        wrapDomEvent
+          dsHTMLel
+          (`DOM.on` DOM.dragEnter)
+          (ddEvent_ DOM.preventDefault)
+      performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+
+      -- Handle drag leave event to revert the drop zone style
+      dragLeaveEvent <-
+        wrapDomEvent
+          dsHTMLel
+          (`DOM.on` DOM.dragLeave)
+          (ddEvent_ $ return ())
+      performEvent_ $ liftIO (putStrLn "Drag leave") <$ dragLeaveEvent
+
+      -- Define the drop zone
+      dropsite <- fst <$> elDynAttr' "div" dropsiteAttrs (dynText dropText)
+      let dsHTMLel = DOM.uncheckedCastTo DOM.HTMLElement $ _element_raw dropsite
+      inDrop <-
+        holdDyn False $
+          leftmost
+            [ True <$ dragEnterEvent,
+              False <$ dragLeaveEvent,
+              False <$ dropEvent
+            ]
+      dropsiteAttrs <- return . ffor inDrop $ \case
+        True -> "style" =: "border:1em solid blue;padding:2em;margin:2em;background-color:green;"
+        False -> "style" =: "border:1em solid blue;padding:2em;margin:2em;"
+
+      -- Handle drag over event to allow dropping
+      dragOverEvent <-
+        wrapDomEvent
+          dsHTMLel
+          (`DOM.on` DOM.dragOver)
+          (ddEvent_ DOM.preventDefault)
+      performEvent_ $ liftIO (putStrLn "Drag over") <$ dragOverEvent
+
+      -- Handle drop event to capture dropped data
+      dropEvent <- wrapDomEvent dsHTMLel (`DOM.on` DOM.drop) $
+        ddEvent $ \dt -> do
+          DOM.preventDefault
+          liftIO $ putStrLn "Drop event triggered"
+          DOM.getData dt ("application/x-reflex-description" :: String)
+      performEvent_ $ liftIO (putStrLn "Dropped") <$ dropEvent
+
+      dropText <- holdDyn "Drop here" $ fmap ("Dropped " <>) dropEvent
+
+      -- Combine all events into a single log
+      let logEvent = leftmost
+            [ "Drag enter" <$ dragEnterEvent
+            , "Drag leave" <$ dragLeaveEvent
+            , "Drag over" <$ dragOverEvent
+            , "Dropped" <$ dropEvent
+            ]
+      logDyn <- foldDyn (\new old -> old <> "\n" <> new) "" logEvent
+
+  return logDyn
+2024-07-23 00:37:42.969846 - Execution Output:
+
+Execution Errors:
+this derivation will be built:
+  /nix/store/gl46smjl4g4vcsm4hpq6r9fk63zbdxky-frontend-0.1.0.0.drv
+building '/nix/store/gl46smjl4g4vcsm4hpq6r9fk63zbdxky-frontend-0.1.0.0.drv'...
+setupCompilerEnvironmentPhase
+Build with /nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7.
+unpacking sources
+unpacking source archive /nix/store/dh7zv9iwl4ypgp67j3m0hlfl6s4rxw69-frontend
+source root is frontend
+patching sources
+compileBuildDriverPhase
+setupCompileFlags: -package-db=/build/tmp.RJTrdFh2op/setup-package.conf.d -j8 -threaded -rtsopts
+[1 of 1] Compiling Main             ( /nix/store/4mdp8nhyfddh7bllbi7xszz7k9955n79-Setup.hs, /build/tmp.RJTrdFh2op/Main.o )
+Linking Setup ...
+updateAutotoolsGnuConfigScriptsPhase
+configuring
+configureFlags: --verbose --prefix=/nix/store/6bnlra29bvycp799hkpj1i6adwaj4sl9-frontend-0.1.0.0 --libdir=$prefix/lib/$compiler --libsubdir=$abi/$libname --docdir=/nix/store/93mqhj2r6smr7f1m2j7hziyn4b0g53ay-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0 --package-db=/build/tmp.RJTrdFh2op/package.conf.d --ghc-options=-j8 --disable-split-objs --disable-library-profiling --disable-profiling --enable-shared --disable-coverage --enable-static --disable-executable-dynamic --disable-tests --disable-benchmarks --enable-library-vanilla --disable-library-for-ghci --ghc-option=-split-sections --disable-library-stripping --disable-executable-stripping --ghcjs --configure-option=--host=js-unknown-ghcjs --with-ghc=ghcjs --with-ghc-pkg=ghc-pkg --with-gcc=cc --hsc2hs-option=--cross-compile --ghcjs-options=-fexpose-all-unfoldings
+Using Parsec parser
+Configuring frontend-0.1.0.0...
+Warning: Unknown/unsupported 'ghc' version detected (Cabal 3.2.1.0 supports
+'ghc' version < 8.8):
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs is is based
+on GHC version 8.10.7
+Dependency base >=4.14.3.0 && <4.15: using base-4.14.3.0
+Dependency containers -any: using containers-0.6.5.1
+Dependency ghcjs-dom -any: using ghcjs-dom-0.9.4.0
+Dependency jsaddle -any: using jsaddle-0.9.8.2
+Dependency jsaddle-dom -any: using jsaddle-dom-0.9.4.1
+Dependency lens -any: using lens-5.0.1
+Dependency patch -any: using patch-0.0.8.2
+Dependency reflex -any: using reflex-0.9.2.0
+Dependency reflex-dom -any: using reflex-dom-0.6.3.1
+Dependency text ==1.2.*: using text-1.2.4.1
+Dependency time -any: using time-1.9.3
+Source component graph: component exe:frontend
+Configured component graph:
+    component frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Linked component graph:
+    unit frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Ready component graph:
+    definite frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        depends base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        depends containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        depends ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        depends jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        depends jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        depends lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        depends patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        depends reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        depends reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        depends text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        depends time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Using Cabal-3.2.1.0 compiled by ghc-8.10
+Using compiler: ghcjs-8.10.7
+Using install prefix:
+/nix/store/6bnlra29bvycp799hkpj1i6adwaj4sl9-frontend-0.1.0.0
+Executables installed in:
+/nix/store/6bnlra29bvycp799hkpj1i6adwaj4sl9-frontend-0.1.0.0/bin
+Libraries installed in:
+/nix/store/6bnlra29bvycp799hkpj1i6adwaj4sl9-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Dynamic Libraries installed in:
+/nix/store/6bnlra29bvycp799hkpj1i6adwaj4sl9-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7
+Private executables installed in:
+/nix/store/6bnlra29bvycp799hkpj1i6adwaj4sl9-frontend-0.1.0.0/libexec/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Data files installed in:
+/nix/store/6bnlra29bvycp799hkpj1i6adwaj4sl9-frontend-0.1.0.0/share/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Documentation installed in:
+/nix/store/93mqhj2r6smr7f1m2j7hziyn4b0g53ay-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0
+Configuration files installed in:
+/nix/store/6bnlra29bvycp799hkpj1i6adwaj4sl9-frontend-0.1.0.0/etc
+No alex found
+Using ar found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ar
+No c2hs found
+No cpphs found
+No doctest found
+Using gcc version 11.3.0 given by user at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/cc
+Using ghc version 8.10.7 given by user at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghc-pkg version 8.10.7 given by user at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/ghc-pkg
+Using ghcjs version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghcjs-pkg version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs-pkg
+No greencard found
+Using haddock version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/haddock
+No happy found
+Using haskell-suite found on system at: haskell-suite-dummy-location
+Using haskell-suite-pkg found on system at: haskell-suite-pkg-dummy-location
+No hmake found
+Using hpc version 0.68 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+Using hsc2hs version 0.68.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+No hscolour found
+No jhc found
+Using ld found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+No pkg-config found
+Using runghc version 8.10.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+Using strip version 2.38 found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+Using tar found on system at:
+/nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+No uhc found
+building
+Preprocessing executable 'frontend' for frontend-0.1.0.0..
+Building executable 'frontend' for frontend-0.1.0.0..
+[1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+
+src/Main.hs:32:22: error:
+    • Couldn't match type ‘[Char]’ with ‘Data.Text.Internal.Text’
+      Expected type: Dynamic t Data.Text.Internal.Text
+        Actual type: Dynamic t String
+    • In the first argument of ‘dynText’, namely ‘out’
+      In the second argument of ‘($)’, namely ‘dynText out’
+      In a stmt of a 'do' block: el "div" $ dynText out
+   |
+32 |   el "div" $ dynText out
+   |                      ^^^
+
+src/Main.hs:87:20: error:
+    • Couldn't match type ‘Dynamic t a0’ with ‘[Char]’
+      Expected type: m (Dynamic t String)
+        Actual type: m (Dynamic t (Dynamic t a0))
+    • In the expression:
+        prerender (return $ constDyn "")
+          $ do let ddEvent ::
+                     (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                     -> DOM.EventM e DOM.MouseEvent a
+                   ddEvent op = ...
+                   ....
+               rec dragEnterEvent <- wrapDomEvent
+                                       dsHTMLel (`DOM.on` DOM.dragEnter)
+                                       (ddEvent_ DOM.preventDefault)
+                   performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                   dragLeaveEvent <- wrapDomEvent
+                                       dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+                   ....
+               return logDyn
+      In an equation for ‘handleDragEvents’:
+          handleDragEvents
+            = prerender (return $ constDyn "")
+                $ do let ddEvent ::
+                           (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                           -> DOM.EventM e DOM.MouseEvent a
+                         ....
+                     rec dragEnterEvent <- wrapDomEvent
+                                             dsHTMLel (`DOM.on` DOM.dragEnter)
+                                             (ddEvent_ DOM.preventDefault)
+                         performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                         ....
+                     return logDyn
+    • Relevant bindings include
+        handleDragEvents :: m (Dynamic t String)
+          (bound at src/Main.hs:87:1)
+   |
+87 | handleDragEvents = prerender (return $ constDyn "") $ do
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+error: builder for '/nix/store/gl46smjl4g4vcsm4hpq6r9fk63zbdxky-frontend-0.1.0.0.drv' failed with exit code 1;
+       last 25 log lines:
+       >                    performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                    dragLeaveEvent <- wrapDomEvent
+       >                                        dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+       >                    ....
+       >                return logDyn
+       >       In an equation for ‘handleDragEvents’:
+       >           handleDragEvents
+       >             = prerender (return $ constDyn "")
+       >                 $ do let ddEvent ::
+       >                            (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+       >                            -> DOM.EventM e DOM.MouseEvent a
+       >                          ....
+       >                      rec dragEnterEvent <- wrapDomEvent
+       >                                              dsHTMLel (`DOM.on` DOM.dragEnter)
+       >                                              (ddEvent_ DOM.preventDefault)
+       >                          performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                          ....
+       >                      return logDyn
+       >     • Relevant bindings include
+       >         handleDragEvents :: m (Dynamic t String)
+       >           (bound at src/Main.hs:87:1)
+       >    |
+       > 87 | handleDragEvents = prerender (return $ constDyn "") $ do
+       >    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+       > 
+       For full logs, run 'nix log /nix/store/gl46smjl4g4vcsm4hpq6r9fk63zbdxky-frontend-0.1.0.0.drv'.
+
+2024-07-23 00:38:15.578524 - Execution Output:
+
+Execution Errors:
+this derivation will be built:
+  /nix/store/xk5jj7kyra0lll0yapaw4jd2ycdrlqvi-frontend-0.1.0.0.drv
+building '/nix/store/xk5jj7kyra0lll0yapaw4jd2ycdrlqvi-frontend-0.1.0.0.drv'...
+setupCompilerEnvironmentPhase
+Build with /nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7.
+unpacking sources
+unpacking source archive /nix/store/950ydvg07c8lqzkkkaa812vrsjdmz1mc-frontend
+source root is frontend
+patching sources
+compileBuildDriverPhase
+setupCompileFlags: -package-db=/build/tmp.Jf6t19CWxx/setup-package.conf.d -j8 -threaded -rtsopts
+[1 of 1] Compiling Main             ( /nix/store/4mdp8nhyfddh7bllbi7xszz7k9955n79-Setup.hs, /build/tmp.Jf6t19CWxx/Main.o )
+Linking Setup ...
+updateAutotoolsGnuConfigScriptsPhase
+configuring
+configureFlags: --verbose --prefix=/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0 --libdir=$prefix/lib/$compiler --libsubdir=$abi/$libname --docdir=/nix/store/i8269jxr32hqn9ipk4pjisskcyb94241-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0 --package-db=/build/tmp.Jf6t19CWxx/package.conf.d --ghc-options=-j8 --disable-split-objs --disable-library-profiling --disable-profiling --enable-shared --disable-coverage --enable-static --disable-executable-dynamic --disable-tests --disable-benchmarks --enable-library-vanilla --disable-library-for-ghci --ghc-option=-split-sections --disable-library-stripping --disable-executable-stripping --ghcjs --configure-option=--host=js-unknown-ghcjs --with-ghc=ghcjs --with-ghc-pkg=ghc-pkg --with-gcc=cc --hsc2hs-option=--cross-compile --ghcjs-options=-fexpose-all-unfoldings
+Using Parsec parser
+Configuring frontend-0.1.0.0...
+Warning: Unknown/unsupported 'ghc' version detected (Cabal 3.2.1.0 supports
+'ghc' version < 8.8):
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs is is based
+on GHC version 8.10.7
+Dependency base >=4.14.3.0 && <4.15: using base-4.14.3.0
+Dependency containers -any: using containers-0.6.5.1
+Dependency ghcjs-dom -any: using ghcjs-dom-0.9.4.0
+Dependency jsaddle -any: using jsaddle-0.9.8.2
+Dependency jsaddle-dom -any: using jsaddle-dom-0.9.4.1
+Dependency lens -any: using lens-5.0.1
+Dependency patch -any: using patch-0.0.8.2
+Dependency reflex -any: using reflex-0.9.2.0
+Dependency reflex-dom -any: using reflex-dom-0.6.3.1
+Dependency text ==1.2.*: using text-1.2.4.1
+Dependency time -any: using time-1.9.3
+Source component graph: component exe:frontend
+Configured component graph:
+    component frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Linked component graph:
+    unit frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Ready component graph:
+    definite frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        depends base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        depends containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        depends ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        depends jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        depends jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        depends lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        depends patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        depends reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        depends reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        depends text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        depends time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Using Cabal-3.2.1.0 compiled by ghc-8.10
+Using compiler: ghcjs-8.10.7
+Using install prefix:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0
+Executables installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/bin
+Libraries installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Dynamic Libraries installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7
+Private executables installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/libexec/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Data files installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/share/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Documentation installed in:
+/nix/store/i8269jxr32hqn9ipk4pjisskcyb94241-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0
+Configuration files installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/etc
+No alex found
+Using ar found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ar
+No c2hs found
+No cpphs found
+No doctest found
+Using gcc version 11.3.0 given by user at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/cc
+Using ghc version 8.10.7 given by user at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghc-pkg version 8.10.7 given by user at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/ghc-pkg
+Using ghcjs version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghcjs-pkg version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs-pkg
+No greencard found
+Using haddock version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/haddock
+No happy found
+Using haskell-suite found on system at: haskell-suite-dummy-location
+Using haskell-suite-pkg found on system at: haskell-suite-pkg-dummy-location
+No hmake found
+Using hpc version 0.68 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+Using hsc2hs version 0.68.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+No hscolour found
+No jhc found
+Using ld found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+No pkg-config found
+Using runghc version 8.10.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+Using strip version 2.38 found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+Using tar found on system at:
+/nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+No uhc found
+building
+Preprocessing executable 'frontend' for frontend-0.1.0.0..
+Building executable 'frontend' for frontend-0.1.0.0..
+[1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+
+src/Main.hs:89:20: error:
+    • Couldn't match type ‘Dynamic t a0’ with ‘Text’
+      Expected type: m (Dynamic t Text)
+        Actual type: m (Dynamic t (Dynamic t a0))
+    • In the expression:
+        prerender (return $ constDyn "")
+          $ do let ddEvent ::
+                     (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                     -> DOM.EventM e DOM.MouseEvent a
+                   ddEvent op = ...
+                   ....
+               rec dragEnterEvent <- wrapDomEvent
+                                       dsHTMLel (`DOM.on` DOM.dragEnter)
+                                       (ddEvent_ DOM.preventDefault)
+                   performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                   dragLeaveEvent <- wrapDomEvent
+                                       dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+                   ....
+               return logDyn
+      In an equation for ‘handleDragEvents’:
+          handleDragEvents
+            = prerender (return $ constDyn "")
+                $ do let ddEvent ::
+                           (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                           -> DOM.EventM e DOM.MouseEvent a
+                         ....
+                     rec dragEnterEvent <- wrapDomEvent
+                                             dsHTMLel (`DOM.on` DOM.dragEnter)
+                                             (ddEvent_ DOM.preventDefault)
+                         performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                         ....
+                     return logDyn
+    • Relevant bindings include
+        handleDragEvents :: m (Dynamic t Text) (bound at src/Main.hs:89:1)
+   |
+89 | handleDragEvents = prerender (return $ constDyn "") $ do
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+error: builder for '/nix/store/xk5jj7kyra0lll0yapaw4jd2ycdrlqvi-frontend-0.1.0.0.drv' failed with exit code 1;
+       last 25 log lines:
+       >                                        (ddEvent_ DOM.preventDefault)
+       >                    performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                    dragLeaveEvent <- wrapDomEvent
+       >                                        dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+       >                    ....
+       >                return logDyn
+       >       In an equation for ‘handleDragEvents’:
+       >           handleDragEvents
+       >             = prerender (return $ constDyn "")
+       >                 $ do let ddEvent ::
+       >                            (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+       >                            -> DOM.EventM e DOM.MouseEvent a
+       >                          ....
+       >                      rec dragEnterEvent <- wrapDomEvent
+       >                                              dsHTMLel (`DOM.on` DOM.dragEnter)
+       >                                              (ddEvent_ DOM.preventDefault)
+       >                          performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                          ....
+       >                      return logDyn
+       >     • Relevant bindings include
+       >         handleDragEvents :: m (Dynamic t Text) (bound at src/Main.hs:89:1)
+       >    |
+       > 89 | handleDragEvents = prerender (return $ constDyn "") $ do
+       >    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+       > 
+       For full logs, run 'nix log /nix/store/xk5jj7kyra0lll0yapaw4jd2ycdrlqvi-frontend-0.1.0.0.drv'.
+
+2024-07-23 00:38:41.845423 - Execution Output:
+
+Execution Errors:
+this derivation will be built:
+  /nix/store/xk5jj7kyra0lll0yapaw4jd2ycdrlqvi-frontend-0.1.0.0.drv
+building '/nix/store/xk5jj7kyra0lll0yapaw4jd2ycdrlqvi-frontend-0.1.0.0.drv'...
+setupCompilerEnvironmentPhase
+Build with /nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7.
+unpacking sources
+unpacking source archive /nix/store/950ydvg07c8lqzkkkaa812vrsjdmz1mc-frontend
+source root is frontend
+patching sources
+compileBuildDriverPhase
+setupCompileFlags: -package-db=/build/tmp.BZT1rZUKLt/setup-package.conf.d -j8 -threaded -rtsopts
+[1 of 1] Compiling Main             ( /nix/store/4mdp8nhyfddh7bllbi7xszz7k9955n79-Setup.hs, /build/tmp.BZT1rZUKLt/Main.o )
+Linking Setup ...
+updateAutotoolsGnuConfigScriptsPhase
+configuring
+configureFlags: --verbose --prefix=/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0 --libdir=$prefix/lib/$compiler --libsubdir=$abi/$libname --docdir=/nix/store/i8269jxr32hqn9ipk4pjisskcyb94241-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0 --package-db=/build/tmp.BZT1rZUKLt/package.conf.d --ghc-options=-j8 --disable-split-objs --disable-library-profiling --disable-profiling --enable-shared --disable-coverage --enable-static --disable-executable-dynamic --disable-tests --disable-benchmarks --enable-library-vanilla --disable-library-for-ghci --ghc-option=-split-sections --disable-library-stripping --disable-executable-stripping --ghcjs --configure-option=--host=js-unknown-ghcjs --with-ghc=ghcjs --with-ghc-pkg=ghc-pkg --with-gcc=cc --hsc2hs-option=--cross-compile --ghcjs-options=-fexpose-all-unfoldings
+Using Parsec parser
+Configuring frontend-0.1.0.0...
+Warning: Unknown/unsupported 'ghc' version detected (Cabal 3.2.1.0 supports
+'ghc' version < 8.8):
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs is is based
+on GHC version 8.10.7
+Dependency base >=4.14.3.0 && <4.15: using base-4.14.3.0
+Dependency containers -any: using containers-0.6.5.1
+Dependency ghcjs-dom -any: using ghcjs-dom-0.9.4.0
+Dependency jsaddle -any: using jsaddle-0.9.8.2
+Dependency jsaddle-dom -any: using jsaddle-dom-0.9.4.1
+Dependency lens -any: using lens-5.0.1
+Dependency patch -any: using patch-0.0.8.2
+Dependency reflex -any: using reflex-0.9.2.0
+Dependency reflex-dom -any: using reflex-dom-0.6.3.1
+Dependency text ==1.2.*: using text-1.2.4.1
+Dependency time -any: using time-1.9.3
+Source component graph: component exe:frontend
+Configured component graph:
+    component frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Linked component graph:
+    unit frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Ready component graph:
+    definite frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        depends base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        depends containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        depends ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        depends jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        depends jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        depends lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        depends patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        depends reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        depends reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        depends text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        depends time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Using Cabal-3.2.1.0 compiled by ghc-8.10
+Using compiler: ghcjs-8.10.7
+Using install prefix:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0
+Executables installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/bin
+Libraries installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Dynamic Libraries installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7
+Private executables installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/libexec/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Data files installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/share/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Documentation installed in:
+/nix/store/i8269jxr32hqn9ipk4pjisskcyb94241-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0
+Configuration files installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/etc
+No alex found
+Using ar found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ar
+No c2hs found
+No cpphs found
+No doctest found
+Using gcc version 11.3.0 given by user at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/cc
+Using ghc version 8.10.7 given by user at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghc-pkg version 8.10.7 given by user at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/ghc-pkg
+Using ghcjs version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghcjs-pkg version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs-pkg
+No greencard found
+Using haddock version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/haddock
+No happy found
+Using haskell-suite found on system at: haskell-suite-dummy-location
+Using haskell-suite-pkg found on system at: haskell-suite-pkg-dummy-location
+No hmake found
+Using hpc version 0.68 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+Using hsc2hs version 0.68.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+No hscolour found
+No jhc found
+Using ld found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+No pkg-config found
+Using runghc version 8.10.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+Using strip version 2.38 found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+Using tar found on system at:
+/nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+No uhc found
+building
+Preprocessing executable 'frontend' for frontend-0.1.0.0..
+Building executable 'frontend' for frontend-0.1.0.0..
+[1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+
+src/Main.hs:89:20: error:
+    • Couldn't match type ‘Dynamic t a0’ with ‘Text’
+      Expected type: m (Dynamic t Text)
+        Actual type: m (Dynamic t (Dynamic t a0))
+    • In the expression:
+        prerender (return $ constDyn "")
+          $ do let ddEvent ::
+                     (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                     -> DOM.EventM e DOM.MouseEvent a
+                   ddEvent op = ...
+                   ....
+               rec dragEnterEvent <- wrapDomEvent
+                                       dsHTMLel (`DOM.on` DOM.dragEnter)
+                                       (ddEvent_ DOM.preventDefault)
+                   performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                   dragLeaveEvent <- wrapDomEvent
+                                       dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+                   ....
+               return logDyn
+      In an equation for ‘handleDragEvents’:
+          handleDragEvents
+            = prerender (return $ constDyn "")
+                $ do let ddEvent ::
+                           (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                           -> DOM.EventM e DOM.MouseEvent a
+                         ....
+                     rec dragEnterEvent <- wrapDomEvent
+                                             dsHTMLel (`DOM.on` DOM.dragEnter)
+                                             (ddEvent_ DOM.preventDefault)
+                         performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                         ....
+                     return logDyn
+    • Relevant bindings include
+        handleDragEvents :: m (Dynamic t Text) (bound at src/Main.hs:89:1)
+   |
+89 | handleDragEvents = prerender (return $ constDyn "") $ do
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+error: builder for '/nix/store/xk5jj7kyra0lll0yapaw4jd2ycdrlqvi-frontend-0.1.0.0.drv' failed with exit code 1;
+       last 25 log lines:
+       >                                        (ddEvent_ DOM.preventDefault)
+       >                    performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                    dragLeaveEvent <- wrapDomEvent
+       >                                        dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+       >                    ....
+       >                return logDyn
+       >       In an equation for ‘handleDragEvents’:
+       >           handleDragEvents
+       >             = prerender (return $ constDyn "")
+       >                 $ do let ddEvent ::
+       >                            (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+       >                            -> DOM.EventM e DOM.MouseEvent a
+       >                          ....
+       >                      rec dragEnterEvent <- wrapDomEvent
+       >                                              dsHTMLel (`DOM.on` DOM.dragEnter)
+       >                                              (ddEvent_ DOM.preventDefault)
+       >                          performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                          ....
+       >                      return logDyn
+       >     • Relevant bindings include
+       >         handleDragEvents :: m (Dynamic t Text) (bound at src/Main.hs:89:1)
+       >    |
+       > 89 | handleDragEvents = prerender (return $ constDyn "") $ do
+       >    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+       > 
+       For full logs, run 'nix log /nix/store/xk5jj7kyra0lll0yapaw4jd2ycdrlqvi-frontend-0.1.0.0.drv'.
+
+2024-07-23 00:39:13.501728 - Execution Output:
+
+Execution Errors:
+this derivation will be built:
+  /nix/store/n1jq8vh0m1266sxqvdn38rmd560s8wfa-frontend-0.1.0.0.drv
+building '/nix/store/n1jq8vh0m1266sxqvdn38rmd560s8wfa-frontend-0.1.0.0.drv'...
+setupCompilerEnvironmentPhase
+Build with /nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7.
+unpacking sources
+unpacking source archive /nix/store/4q145z2fb5psk872mmlb3d2m1200dpin-frontend
+source root is frontend
+patching sources
+compileBuildDriverPhase
+setupCompileFlags: -package-db=/build/tmp.zxaebOtC6L/setup-package.conf.d -j8 -threaded -rtsopts
+[1 of 1] Compiling Main             ( /nix/store/4mdp8nhyfddh7bllbi7xszz7k9955n79-Setup.hs, /build/tmp.zxaebOtC6L/Main.o )
+Linking Setup ...
+updateAutotoolsGnuConfigScriptsPhase
+configuring
+configureFlags: --verbose --prefix=/nix/store/jiqkmhp5sgzs2cdp3jssagj7ja4xmxc3-frontend-0.1.0.0 --libdir=$prefix/lib/$compiler --libsubdir=$abi/$libname --docdir=/nix/store/9agr5gsr921zrkqjy2p2gl4iy099m7zv-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0 --package-db=/build/tmp.zxaebOtC6L/package.conf.d --ghc-options=-j8 --disable-split-objs --disable-library-profiling --disable-profiling --enable-shared --disable-coverage --enable-static --disable-executable-dynamic --disable-tests --disable-benchmarks --enable-library-vanilla --disable-library-for-ghci --ghc-option=-split-sections --disable-library-stripping --disable-executable-stripping --ghcjs --configure-option=--host=js-unknown-ghcjs --with-ghc=ghcjs --with-ghc-pkg=ghc-pkg --with-gcc=cc --hsc2hs-option=--cross-compile --ghcjs-options=-fexpose-all-unfoldings
+Using Parsec parser
+Configuring frontend-0.1.0.0...
+Warning: Unknown/unsupported 'ghc' version detected (Cabal 3.2.1.0 supports
+'ghc' version < 8.8):
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs is is based
+on GHC version 8.10.7
+Dependency base >=4.14.3.0 && <4.15: using base-4.14.3.0
+Dependency containers -any: using containers-0.6.5.1
+Dependency ghcjs-dom -any: using ghcjs-dom-0.9.4.0
+Dependency jsaddle -any: using jsaddle-0.9.8.2
+Dependency jsaddle-dom -any: using jsaddle-dom-0.9.4.1
+Dependency lens -any: using lens-5.0.1
+Dependency patch -any: using patch-0.0.8.2
+Dependency reflex -any: using reflex-0.9.2.0
+Dependency reflex-dom -any: using reflex-dom-0.6.3.1
+Dependency text ==1.2.*: using text-1.2.4.1
+Dependency time -any: using time-1.9.3
+Source component graph: component exe:frontend
+Configured component graph:
+    component frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Linked component graph:
+    unit frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Ready component graph:
+    definite frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        depends base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        depends containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        depends ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        depends jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        depends jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        depends lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        depends patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        depends reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        depends reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        depends text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        depends time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Using Cabal-3.2.1.0 compiled by ghc-8.10
+Using compiler: ghcjs-8.10.7
+Using install prefix:
+/nix/store/jiqkmhp5sgzs2cdp3jssagj7ja4xmxc3-frontend-0.1.0.0
+Executables installed in:
+/nix/store/jiqkmhp5sgzs2cdp3jssagj7ja4xmxc3-frontend-0.1.0.0/bin
+Libraries installed in:
+/nix/store/jiqkmhp5sgzs2cdp3jssagj7ja4xmxc3-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Dynamic Libraries installed in:
+/nix/store/jiqkmhp5sgzs2cdp3jssagj7ja4xmxc3-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7
+Private executables installed in:
+/nix/store/jiqkmhp5sgzs2cdp3jssagj7ja4xmxc3-frontend-0.1.0.0/libexec/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Data files installed in:
+/nix/store/jiqkmhp5sgzs2cdp3jssagj7ja4xmxc3-frontend-0.1.0.0/share/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Documentation installed in:
+/nix/store/9agr5gsr921zrkqjy2p2gl4iy099m7zv-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0
+Configuration files installed in:
+/nix/store/jiqkmhp5sgzs2cdp3jssagj7ja4xmxc3-frontend-0.1.0.0/etc
+No alex found
+Using ar found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ar
+No c2hs found
+No cpphs found
+No doctest found
+Using gcc version 11.3.0 given by user at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/cc
+Using ghc version 8.10.7 given by user at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghc-pkg version 8.10.7 given by user at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/ghc-pkg
+Using ghcjs version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghcjs-pkg version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs-pkg
+No greencard found
+Using haddock version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/haddock
+No happy found
+Using haskell-suite found on system at: haskell-suite-dummy-location
+Using haskell-suite-pkg found on system at: haskell-suite-pkg-dummy-location
+No hmake found
+Using hpc version 0.68 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+Using hsc2hs version 0.68.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+No hscolour found
+No jhc found
+Using ld found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+No pkg-config found
+Using runghc version 8.10.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+Using strip version 2.38 found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+Using tar found on system at:
+/nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+No uhc found
+building
+Preprocessing executable 'frontend' for frontend-0.1.0.0..
+Building executable 'frontend' for frontend-0.1.0.0..
+[1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+
+src/Main.hs:160:22: error:
+    parse error (possibly incorrect indentation or mismatched brackets)
+    |
+160 |   prerender (return $
+    |                      ^
+
+error: builder for '/nix/store/n1jq8vh0m1266sxqvdn38rmd560s8wfa-frontend-0.1.0.0.drv' failed with exit code 1;
+       last 25 log lines:
+       > Using hsc2hs version 0.68.7 found on system at:
+       > /nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+       > No hscolour found
+       > No jhc found
+       > Using ld found on system at:
+       > /nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+       > No pkg-config found
+       > Using runghc version 8.10.7 found on system at:
+       > /nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+       > Using strip version 2.38 found on system at:
+       > /nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+       > Using tar found on system at:
+       > /nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+       > No uhc found
+       > building
+       > Preprocessing executable 'frontend' for frontend-0.1.0.0..
+       > Building executable 'frontend' for frontend-0.1.0.0..
+       > [1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+       >
+       > src/Main.hs:160:22: error:
+       >     parse error (possibly incorrect indentation or mismatched brackets)
+       >     |
+       > 160 |   prerender (return $
+       >     |                      ^
+       > 
+       For full logs, run 'nix log /nix/store/n1jq8vh0m1266sxqvdn38rmd560s8wfa-frontend-0.1.0.0.drv'.
+
+2024-07-23 00:39:44.584908 - Execution Output:
+
+Execution Errors:
+this derivation will be built:
+  /nix/store/sifp3zw7kw2g5g6mbmn3b81l2gz02crc-frontend-0.1.0.0.drv
+building '/nix/store/sifp3zw7kw2g5g6mbmn3b81l2gz02crc-frontend-0.1.0.0.drv'...
+setupCompilerEnvironmentPhase
+Build with /nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7.
+unpacking sources
+unpacking source archive /nix/store/vnxic0rx4yyw0rkjp73lg6k6pd9nll5c-frontend
+source root is frontend
+patching sources
+compileBuildDriverPhase
+setupCompileFlags: -package-db=/build/tmp.7yUgGyi995/setup-package.conf.d -j8 -threaded -rtsopts
+[1 of 1] Compiling Main             ( /nix/store/4mdp8nhyfddh7bllbi7xszz7k9955n79-Setup.hs, /build/tmp.7yUgGyi995/Main.o )
+Linking Setup ...
+updateAutotoolsGnuConfigScriptsPhase
+configuring
+configureFlags: --verbose --prefix=/nix/store/lc32d33nb0lccxl82dmjgjyf9ylqvmab-frontend-0.1.0.0 --libdir=$prefix/lib/$compiler --libsubdir=$abi/$libname --docdir=/nix/store/h2kj3a1w6c3p00df536lfljmss4r3m8z-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0 --package-db=/build/tmp.7yUgGyi995/package.conf.d --ghc-options=-j8 --disable-split-objs --disable-library-profiling --disable-profiling --enable-shared --disable-coverage --enable-static --disable-executable-dynamic --disable-tests --disable-benchmarks --enable-library-vanilla --disable-library-for-ghci --ghc-option=-split-sections --disable-library-stripping --disable-executable-stripping --ghcjs --configure-option=--host=js-unknown-ghcjs --with-ghc=ghcjs --with-ghc-pkg=ghc-pkg --with-gcc=cc --hsc2hs-option=--cross-compile --ghcjs-options=-fexpose-all-unfoldings
+Using Parsec parser
+Configuring frontend-0.1.0.0...
+Warning: Unknown/unsupported 'ghc' version detected (Cabal 3.2.1.0 supports
+'ghc' version < 8.8):
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs is is based
+on GHC version 8.10.7
+Dependency base >=4.14.3.0 && <4.15: using base-4.14.3.0
+Dependency containers -any: using containers-0.6.5.1
+Dependency ghcjs-dom -any: using ghcjs-dom-0.9.4.0
+Dependency jsaddle -any: using jsaddle-0.9.8.2
+Dependency jsaddle-dom -any: using jsaddle-dom-0.9.4.1
+Dependency lens -any: using lens-5.0.1
+Dependency patch -any: using patch-0.0.8.2
+Dependency reflex -any: using reflex-0.9.2.0
+Dependency reflex-dom -any: using reflex-dom-0.6.3.1
+Dependency text ==1.2.*: using text-1.2.4.1
+Dependency time -any: using time-1.9.3
+Source component graph: component exe:frontend
+Configured component graph:
+    component frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Linked component graph:
+    unit frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Ready component graph:
+    definite frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        depends base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        depends containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        depends ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        depends jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        depends jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        depends lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        depends patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        depends reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        depends reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        depends text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        depends time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Using Cabal-3.2.1.0 compiled by ghc-8.10
+Using compiler: ghcjs-8.10.7
+Using install prefix:
+/nix/store/lc32d33nb0lccxl82dmjgjyf9ylqvmab-frontend-0.1.0.0
+Executables installed in:
+/nix/store/lc32d33nb0lccxl82dmjgjyf9ylqvmab-frontend-0.1.0.0/bin
+Libraries installed in:
+/nix/store/lc32d33nb0lccxl82dmjgjyf9ylqvmab-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Dynamic Libraries installed in:
+/nix/store/lc32d33nb0lccxl82dmjgjyf9ylqvmab-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7
+Private executables installed in:
+/nix/store/lc32d33nb0lccxl82dmjgjyf9ylqvmab-frontend-0.1.0.0/libexec/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Data files installed in:
+/nix/store/lc32d33nb0lccxl82dmjgjyf9ylqvmab-frontend-0.1.0.0/share/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Documentation installed in:
+/nix/store/h2kj3a1w6c3p00df536lfljmss4r3m8z-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0
+Configuration files installed in:
+/nix/store/lc32d33nb0lccxl82dmjgjyf9ylqvmab-frontend-0.1.0.0/etc
+No alex found
+Using ar found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ar
+No c2hs found
+No cpphs found
+No doctest found
+Using gcc version 11.3.0 given by user at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/cc
+Using ghc version 8.10.7 given by user at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghc-pkg version 8.10.7 given by user at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/ghc-pkg
+Using ghcjs version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghcjs-pkg version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs-pkg
+No greencard found
+Using haddock version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/haddock
+No happy found
+Using haskell-suite found on system at: haskell-suite-dummy-location
+Using haskell-suite-pkg found on system at: haskell-suite-pkg-dummy-location
+No hmake found
+Using hpc version 0.68 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+Using hsc2hs version 0.68.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+No hscolour found
+No jhc found
+Using ld found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+No pkg-config found
+Using runghc version 8.10.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+Using strip version 2.38 found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+Using tar found on system at:
+/nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+No uhc found
+building
+Preprocessing executable 'frontend' for frontend-0.1.0.0..
+Building executable 'frontend' for frontend-0.1.0.0..
+[1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+
+src/Main.hs:160:3: error:
+    • Couldn't match type ‘Dynamic t a0’ with ‘Text’
+      Expected type: m (Dynamic t Text)
+        Actual type: m (Dynamic t (Dynamic t a0))
+    • In a stmt of a 'do' block:
+        prerender (return $ constDyn "") (return logDyn)
+      In the expression:
+        do let ddEvent ::
+                 (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                 -> DOM.EventM e DOM.MouseEvent a
+               ddEvent op = ...
+               ....
+           rec dragEnterEvent <- wrapDomEvent
+                                   dsHTMLel (`DOM.on` DOM.dragEnter) (ddEvent_ DOM.preventDefault)
+               performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+               dragLeaveEvent <- wrapDomEvent
+                                   dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+               ....
+           prerender (return $ constDyn "") (return logDyn)
+      In an equation for ‘handleDragEvents’:
+          handleDragEvents
+            = do let ddEvent ::
+                       (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                       -> DOM.EventM e DOM.MouseEvent a
+                     ....
+                 rec dragEnterEvent <- wrapDomEvent
+                                         dsHTMLel (`DOM.on` DOM.dragEnter)
+                                         (ddEvent_ DOM.preventDefault)
+                     performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                     ....
+                 prerender (return $ constDyn "") (return logDyn)
+    • Relevant bindings include
+        dragEnterEvent :: Event t () (bound at src/Main.hs:104:7)
+        dragLeaveEvent :: Event t () (bound at src/Main.hs:112:7)
+        dragOverEvent :: Event t () (bound at src/Main.hs:134:7)
+        dropEvent :: Event t String (bound at src/Main.hs:142:7)
+        dropText :: Dynamic t Text (bound at src/Main.hs:149:7)
+        dropsite :: Element EventResult (DomBuilderSpace m) t
+          (bound at src/Main.hs:120:7)
+        logEvent :: Event t a0 (bound at src/Main.hs:152:11)
+        (Some bindings suppressed; use -fmax-relevant-binds=N or -fno-max-relevant-binds)
+    |
+160 |   prerender (return $ constDyn "") (return logDyn)
+    |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: builder for '/nix/store/sifp3zw7kw2g5g6mbmn3b81l2gz02crc-frontend-0.1.0.0.drv' failed with exit code 1;
+       last 25 log lines:
+       >           handleDragEvents
+       >             = do let ddEvent ::
+       >                        (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+       >                        -> DOM.EventM e DOM.MouseEvent a
+       >                      ....
+       >                  rec dragEnterEvent <- wrapDomEvent
+       >                                          dsHTMLel (`DOM.on` DOM.dragEnter)
+       >                                          (ddEvent_ DOM.preventDefault)
+       >                      performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                      ....
+       >                  prerender (return $ constDyn "") (return logDyn)
+       >     • Relevant bindings include
+       >         dragEnterEvent :: Event t () (bound at src/Main.hs:104:7)
+       >         dragLeaveEvent :: Event t () (bound at src/Main.hs:112:7)
+       >         dragOverEvent :: Event t () (bound at src/Main.hs:134:7)
+       >         dropEvent :: Event t String (bound at src/Main.hs:142:7)
+       >         dropText :: Dynamic t Text (bound at src/Main.hs:149:7)
+       >         dropsite :: Element EventResult (DomBuilderSpace m) t
+       >           (bound at src/Main.hs:120:7)
+       >         logEvent :: Event t a0 (bound at src/Main.hs:152:11)
+       >         (Some bindings suppressed; use -fmax-relevant-binds=N or -fno-max-relevant-binds)
+       >     |
+       > 160 |   prerender (return $ constDyn "") (return logDyn)
+       >     |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+       > 
+       For full logs, run 'nix log /nix/store/sifp3zw7kw2g5g6mbmn3b81l2gz02crc-frontend-0.1.0.0.drv'.
+
+2024-07-23 00:40:47.252564 - Execution Output:
+
+Execution Errors:
+this derivation will be built:
+  /nix/store/mf5qx8c916z0daaccvsvg9fk2733z5p2-frontend-0.1.0.0.drv
+building '/nix/store/mf5qx8c916z0daaccvsvg9fk2733z5p2-frontend-0.1.0.0.drv'...
+setupCompilerEnvironmentPhase
+Build with /nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7.
+unpacking sources
+unpacking source archive /nix/store/rnirr6n7bvyp69260h0cch5l9wn6an41-frontend
+source root is frontend
+patching sources
+compileBuildDriverPhase
+setupCompileFlags: -package-db=/build/tmp.z1h7yFjK0Q/setup-package.conf.d -j8 -threaded -rtsopts
+[1 of 1] Compiling Main             ( /nix/store/4mdp8nhyfddh7bllbi7xszz7k9955n79-Setup.hs, /build/tmp.z1h7yFjK0Q/Main.o )
+Linking Setup ...
+updateAutotoolsGnuConfigScriptsPhase
+configuring
+configureFlags: --verbose --prefix=/nix/store/ajgcwqdcx09wfpxsys6s5ddzhc63r071-frontend-0.1.0.0 --libdir=$prefix/lib/$compiler --libsubdir=$abi/$libname --docdir=/nix/store/fxsn6mga55jnyyfmcqvxavk2z6iaj3qv-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0 --package-db=/build/tmp.z1h7yFjK0Q/package.conf.d --ghc-options=-j8 --disable-split-objs --disable-library-profiling --disable-profiling --enable-shared --disable-coverage --enable-static --disable-executable-dynamic --disable-tests --disable-benchmarks --enable-library-vanilla --disable-library-for-ghci --ghc-option=-split-sections --disable-library-stripping --disable-executable-stripping --ghcjs --configure-option=--host=js-unknown-ghcjs --with-ghc=ghcjs --with-ghc-pkg=ghc-pkg --with-gcc=cc --hsc2hs-option=--cross-compile --ghcjs-options=-fexpose-all-unfoldings
+Using Parsec parser
+Configuring frontend-0.1.0.0...
+Warning: Unknown/unsupported 'ghc' version detected (Cabal 3.2.1.0 supports
+'ghc' version < 8.8):
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs is is based
+on GHC version 8.10.7
+Dependency base >=4.14.3.0 && <4.15: using base-4.14.3.0
+Dependency containers -any: using containers-0.6.5.1
+Dependency ghcjs-dom -any: using ghcjs-dom-0.9.4.0
+Dependency jsaddle -any: using jsaddle-0.9.8.2
+Dependency jsaddle-dom -any: using jsaddle-dom-0.9.4.1
+Dependency lens -any: using lens-5.0.1
+Dependency patch -any: using patch-0.0.8.2
+Dependency reflex -any: using reflex-0.9.2.0
+Dependency reflex-dom -any: using reflex-dom-0.6.3.1
+Dependency text ==1.2.*: using text-1.2.4.1
+Dependency time -any: using time-1.9.3
+Source component graph: component exe:frontend
+Configured component graph:
+    component frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Linked component graph:
+    unit frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Ready component graph:
+    definite frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        depends base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        depends containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        depends ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        depends jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        depends jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        depends lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        depends patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        depends reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        depends reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        depends text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        depends time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Using Cabal-3.2.1.0 compiled by ghc-8.10
+Using compiler: ghcjs-8.10.7
+Using install prefix:
+/nix/store/ajgcwqdcx09wfpxsys6s5ddzhc63r071-frontend-0.1.0.0
+Executables installed in:
+/nix/store/ajgcwqdcx09wfpxsys6s5ddzhc63r071-frontend-0.1.0.0/bin
+Libraries installed in:
+/nix/store/ajgcwqdcx09wfpxsys6s5ddzhc63r071-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Dynamic Libraries installed in:
+/nix/store/ajgcwqdcx09wfpxsys6s5ddzhc63r071-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7
+Private executables installed in:
+/nix/store/ajgcwqdcx09wfpxsys6s5ddzhc63r071-frontend-0.1.0.0/libexec/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Data files installed in:
+/nix/store/ajgcwqdcx09wfpxsys6s5ddzhc63r071-frontend-0.1.0.0/share/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Documentation installed in:
+/nix/store/fxsn6mga55jnyyfmcqvxavk2z6iaj3qv-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0
+Configuration files installed in:
+/nix/store/ajgcwqdcx09wfpxsys6s5ddzhc63r071-frontend-0.1.0.0/etc
+No alex found
+Using ar found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ar
+No c2hs found
+No cpphs found
+No doctest found
+Using gcc version 11.3.0 given by user at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/cc
+Using ghc version 8.10.7 given by user at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghc-pkg version 8.10.7 given by user at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/ghc-pkg
+Using ghcjs version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghcjs-pkg version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs-pkg
+No greencard found
+Using haddock version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/haddock
+No happy found
+Using haskell-suite found on system at: haskell-suite-dummy-location
+Using haskell-suite-pkg found on system at: haskell-suite-pkg-dummy-location
+No hmake found
+Using hpc version 0.68 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+Using hsc2hs version 0.68.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+No hscolour found
+No jhc found
+Using ld found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+No pkg-config found
+Using runghc version 8.10.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+Using strip version 2.38 found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+Using tar found on system at:
+/nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+No uhc found
+building
+Preprocessing executable 'frontend' for frontend-0.1.0.0..
+Building executable 'frontend' for frontend-0.1.0.0..
+[1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+
+src/Main.hs:103:3: error:
+    The last statement in a 'do' block must be an expression
+      rec dragEnterEvent <- wrapDomEvent
+                              dsHTMLel (`DOM.on` DOM.dragEnter) (ddEvent_ DOM.preventDefault)
+          performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+          dragLeaveEvent <- wrapDomEvent
+                              dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+          performEvent_ $ liftIO (putStrLn "Drag leave") <$ dragLeaveEvent
+          dropsite <- fst
+                        <$> elDynAttr' "div" dropsiteAttrs (dynText dropText)
+          ....
+    |
+103 |   rec -- Handle drag enter event to indicate the drop zone is active
+    |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+error: builder for '/nix/store/mf5qx8c916z0daaccvsvg9fk2733z5p2-frontend-0.1.0.0.drv' failed with exit code 1;
+       last 25 log lines:
+       > Using strip version 2.38 found on system at:
+       > /nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+       > Using tar found on system at:
+       > /nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+       > No uhc found
+       > building
+       > Preprocessing executable 'frontend' for frontend-0.1.0.0..
+       > Building executable 'frontend' for frontend-0.1.0.0..
+       > [1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+       >
+       > src/Main.hs:103:3: error:
+       >     The last statement in a 'do' block must be an expression
+       >       rec dragEnterEvent <- wrapDomEvent
+       >                               dsHTMLel (`DOM.on` DOM.dragEnter) (ddEvent_ DOM.preventDefault)
+       >           performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >           dragLeaveEvent <- wrapDomEvent
+       >                               dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+       >           performEvent_ $ liftIO (putStrLn "Drag leave") <$ dragLeaveEvent
+       >           dropsite <- fst
+       >                         <$> elDynAttr' "div" dropsiteAttrs (dynText dropText)
+       >           ....
+       >     |
+       > 103 |   rec -- Handle drag enter event to indicate the drop zone is active
+       >     |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+       > 
+       For full logs, run 'nix log /nix/store/mf5qx8c916z0daaccvsvg9fk2733z5p2-frontend-0.1.0.0.drv'.
+
+2024-07-23 00:41:44.662868 - Execution Output:
+
+Execution Errors:
+this derivation will be built:
+  /nix/store/xk5jj7kyra0lll0yapaw4jd2ycdrlqvi-frontend-0.1.0.0.drv
+building '/nix/store/xk5jj7kyra0lll0yapaw4jd2ycdrlqvi-frontend-0.1.0.0.drv'...
+setupCompilerEnvironmentPhase
+Build with /nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7.
+unpacking sources
+unpacking source archive /nix/store/950ydvg07c8lqzkkkaa812vrsjdmz1mc-frontend
+source root is frontend
+patching sources
+compileBuildDriverPhase
+setupCompileFlags: -package-db=/build/tmp.PeI887lVk1/setup-package.conf.d -j8 -threaded -rtsopts
+[1 of 1] Compiling Main             ( /nix/store/4mdp8nhyfddh7bllbi7xszz7k9955n79-Setup.hs, /build/tmp.PeI887lVk1/Main.o )
+Linking Setup ...
+updateAutotoolsGnuConfigScriptsPhase
+configuring
+configureFlags: --verbose --prefix=/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0 --libdir=$prefix/lib/$compiler --libsubdir=$abi/$libname --docdir=/nix/store/i8269jxr32hqn9ipk4pjisskcyb94241-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0 --package-db=/build/tmp.PeI887lVk1/package.conf.d --ghc-options=-j8 --disable-split-objs --disable-library-profiling --disable-profiling --enable-shared --disable-coverage --enable-static --disable-executable-dynamic --disable-tests --disable-benchmarks --enable-library-vanilla --disable-library-for-ghci --ghc-option=-split-sections --disable-library-stripping --disable-executable-stripping --ghcjs --configure-option=--host=js-unknown-ghcjs --with-ghc=ghcjs --with-ghc-pkg=ghc-pkg --with-gcc=cc --hsc2hs-option=--cross-compile --ghcjs-options=-fexpose-all-unfoldings
+Using Parsec parser
+Configuring frontend-0.1.0.0...
+Warning: Unknown/unsupported 'ghc' version detected (Cabal 3.2.1.0 supports
+'ghc' version < 8.8):
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs is is based
+on GHC version 8.10.7
+Dependency base >=4.14.3.0 && <4.15: using base-4.14.3.0
+Dependency containers -any: using containers-0.6.5.1
+Dependency ghcjs-dom -any: using ghcjs-dom-0.9.4.0
+Dependency jsaddle -any: using jsaddle-0.9.8.2
+Dependency jsaddle-dom -any: using jsaddle-dom-0.9.4.1
+Dependency lens -any: using lens-5.0.1
+Dependency patch -any: using patch-0.0.8.2
+Dependency reflex -any: using reflex-0.9.2.0
+Dependency reflex-dom -any: using reflex-dom-0.6.3.1
+Dependency text ==1.2.*: using text-1.2.4.1
+Dependency time -any: using time-1.9.3
+Source component graph: component exe:frontend
+Configured component graph:
+    component frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Linked component graph:
+    unit frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Ready component graph:
+    definite frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        depends base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        depends containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        depends ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        depends jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        depends jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        depends lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        depends patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        depends reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        depends reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        depends text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        depends time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Using Cabal-3.2.1.0 compiled by ghc-8.10
+Using compiler: ghcjs-8.10.7
+Using install prefix:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0
+Executables installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/bin
+Libraries installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Dynamic Libraries installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7
+Private executables installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/libexec/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Data files installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/share/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Documentation installed in:
+/nix/store/i8269jxr32hqn9ipk4pjisskcyb94241-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0
+Configuration files installed in:
+/nix/store/xb4kwlbv22mb295c5pky06c92cpnmnf6-frontend-0.1.0.0/etc
+No alex found
+Using ar found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ar
+No c2hs found
+No cpphs found
+No doctest found
+Using gcc version 11.3.0 given by user at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/cc
+Using ghc version 8.10.7 given by user at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghc-pkg version 8.10.7 given by user at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/ghc-pkg
+Using ghcjs version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghcjs-pkg version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs-pkg
+No greencard found
+Using haddock version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/haddock
+No happy found
+Using haskell-suite found on system at: haskell-suite-dummy-location
+Using haskell-suite-pkg found on system at: haskell-suite-pkg-dummy-location
+No hmake found
+Using hpc version 0.68 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+Using hsc2hs version 0.68.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+No hscolour found
+No jhc found
+Using ld found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+No pkg-config found
+Using runghc version 8.10.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+Using strip version 2.38 found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+Using tar found on system at:
+/nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+No uhc found
+building
+Preprocessing executable 'frontend' for frontend-0.1.0.0..
+Building executable 'frontend' for frontend-0.1.0.0..
+[1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+
+src/Main.hs:89:20: error:
+    • Couldn't match type ‘Dynamic t a0’ with ‘Text’
+      Expected type: m (Dynamic t Text)
+        Actual type: m (Dynamic t (Dynamic t a0))
+    • In the expression:
+        prerender (return $ constDyn "")
+          $ do let ddEvent ::
+                     (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                     -> DOM.EventM e DOM.MouseEvent a
+                   ddEvent op = ...
+                   ....
+               rec dragEnterEvent <- wrapDomEvent
+                                       dsHTMLel (`DOM.on` DOM.dragEnter)
+                                       (ddEvent_ DOM.preventDefault)
+                   performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                   dragLeaveEvent <- wrapDomEvent
+                                       dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+                   ....
+               return logDyn
+      In an equation for ‘handleDragEvents’:
+          handleDragEvents
+            = prerender (return $ constDyn "")
+                $ do let ddEvent ::
+                           (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                           -> DOM.EventM e DOM.MouseEvent a
+                         ....
+                     rec dragEnterEvent <- wrapDomEvent
+                                             dsHTMLel (`DOM.on` DOM.dragEnter)
+                                             (ddEvent_ DOM.preventDefault)
+                         performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                         ....
+                     return logDyn
+    • Relevant bindings include
+        handleDragEvents :: m (Dynamic t Text) (bound at src/Main.hs:89:1)
+   |
+89 | handleDragEvents = prerender (return $ constDyn "") $ do
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+error: builder for '/nix/store/xk5jj7kyra0lll0yapaw4jd2ycdrlqvi-frontend-0.1.0.0.drv' failed with exit code 1;
+       last 25 log lines:
+       >                                        (ddEvent_ DOM.preventDefault)
+       >                    performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                    dragLeaveEvent <- wrapDomEvent
+       >                                        dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+       >                    ....
+       >                return logDyn
+       >       In an equation for ‘handleDragEvents’:
+       >           handleDragEvents
+       >             = prerender (return $ constDyn "")
+       >                 $ do let ddEvent ::
+       >                            (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+       >                            -> DOM.EventM e DOM.MouseEvent a
+       >                          ....
+       >                      rec dragEnterEvent <- wrapDomEvent
+       >                                              dsHTMLel (`DOM.on` DOM.dragEnter)
+       >                                              (ddEvent_ DOM.preventDefault)
+       >                          performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                          ....
+       >                      return logDyn
+       >     • Relevant bindings include
+       >         handleDragEvents :: m (Dynamic t Text) (bound at src/Main.hs:89:1)
+       >    |
+       > 89 | handleDragEvents = prerender (return $ constDyn "") $ do
+       >    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+       > 
+       For full logs, run 'nix log /nix/store/xk5jj7kyra0lll0yapaw4jd2ycdrlqvi-frontend-0.1.0.0.drv'.
+
+2024-07-23 00:41:49.682296 - Error: Error code: 429 - {'error': {'message': 'Request too large for gpt-4o in organization org-RJC3zLlzghikxw7c2d2SQCin on tokens per min (TPM): Limit 30000, Requested 31680. The input or output tokens must be reduced in order to run successfully. Visit https://platform.openai.com/account/rate-limits to learn more.', 'type': 'tokens', 'param': None, 'code': 'rate_limit_exceeded'}}
+2024-07-23 00:43:59.866245 - Sent: liftIO
+Results:
+Search Terms: liftIO
+Result 1:
+Chunk index: 25
+Distance: 1.3096442222595215
+Code Chunk:
+        _ <- liftIO $ atomically $ tryTakeTMVar isOpen
+        liftIO $ writeIORef currentSocketRef Nothing
+        when (_webSocketConfig_reconnect config) $ forkJSM $ do
+          liftIO $ threadDelay 1000000
+          start
+      start = do
+        ws <- newWebSocket url (_webSocketConfig_protocols config) (onRawMessage >=> liftIO . onMessage) (liftIO onOpen) (liftIO onError) onClose
+        liftIO $ writeIORef currentSocketRef $ Just ws
+        return ()
+  performEvent_ . (liftJSM start <$) =<< getPostBuild
+  performEvent_ $ ffor (_webSocketConfig_send config) $ \payloads -> forM_ payloads $ \payload ->
+    liftIO $ atomically $ writeTQueue payloadQueue payload
+  performEvent_ $ ffor (_webSocketConfig_close config) $ \(code,reason) -> liftJSM $ do
+    mws <- liftIO $ readIORef currentSocketRef
+    case mws of
+      Nothing -> return ()
+      Just ws -> closeWebSocket ws (fromIntegral code) reason
+
+  ctx <- askJSM
+  _ <- liftIO $ forkIO $ forever $ do
+    payload <- atomically $ do
+      pl     <- readTQueue payloadQueue
+      open   <- tryReadTMVar isOpen
+      if isJust open then return pl else retry
+
+    mws <- liftIO $ readIORef currentSocketRef
+    success <- case mws of
+      Nothing -> return False
+      Just ws -> flip runJSM ctx $ do
+        rs <- getReadyState $ unWebSocket ws
+        if rs == 1
+          then (webSocketSend ws payload >> return True) `JS.catch` (\(_ :: SomeException) -> return False)
+          else return False
+    unless success $ atomically $ unGetTQueue payloadQueue payload
+  return $ RawWebSocket eRecv eOpen eError eClose
+
+textWebSocket :: (IsWebSocketMessage a, MonadJSM m, MonadJSM (Performable m), PostBuild t m, TriggerEvent t m, PerformEvent t m, MonadHold t m, Reflex t) => Text -> WebSocketConfig t a -> m (RawWebSocket t Text)
+textWebSocket url cfg = webSocket' url cfg (either (return . decodeUtf8) fromJSValUnchecked)
+
+jsonWebSocket :: (ToJSON a, FromJSON b, MonadJSM m, MonadJSM (Performable m), PostBuild t m, TriggerEvent t m, PerformEvent t m, MonadHold t m, Reflex t) => Text -> WebSocketConfig t a -> m (RawWebSocket t (Maybe b))
+jsonWebSocket url cfg = do
+  ws <- textWebSocket url $ cfg { _webSocketConfig_send = fmap (decodeUtf8 . toStrict . encode) <$> _webSocketConfig_send cfg }
+  return ws { _webSocket_recv = jsonDecode . textToJSString <$> _webSocket_recv ws }
+
+forkJSM :: JSM () -> JSM ()
+forkJSM a = do
+  jsm <- askJSM
+  void $ liftIO $ forkIO $ runJSM a jsm
+
+#ifdef USE_TEMPLATE_HASKELL
+makeLensesWith (lensRules & simpleLenses .~ True) ''WebSocketConfig
+makeLensesWith (lensRules & simpleLenses .~ True) ''RawWebSocket
+#else
+
+webSocketConfig_send :: Lens' (WebSocketConfig t a) (Event t [a])
+webSocketConfig_send f (WebSocketConfig x1 x2 x3 x4) = (\y -> WebSocketConfig y x2 x3 x4) <$> f x1
+{-# INLINE webSocketConfig_send #-}
+
+webSocketConfig_close :: Lens' (WebSocketConfig t a) (Event t (Word, Text))
+webSocketConfig_close f (WebSocketConfig x1 x2 x3 x4) = (\y -> WebSocketConfig x1 y x3 x4) <$> f x2
+{-# INLINE webSocketConfig_close #-}
+
+webSocketConfig_reconnect :: Lens' (WebSocketConfig t a) Bool
+webSocketConfig_reconnect f (WebSocketConfig x1 x2 x3 x4) = (\y -> WebSocketConfig x1 x2 y x4) <$> f x3
+{-# INLINE webSocketConfig_reconnect #-}
+
+webSocketConfig_protocols :: Lens' (WebSocketConfig t a) [Text]
+webSocketConfig_protocols f (WebSocketConfig x1 x2 x3 x4) = (\y -> WebSocketConfig x1 x2 x3 y) <$> f x4
+{-# INLINE webSocketConfig_protocols #-}
+
+webSocket_recv :: Lens' (RawWebSocket t a) (Event t a)
+webSocket_recv f (RawWebSocket x1 x2 x3 x4) = (\y -> RawWebSocket y x2 x3 x4) <$> f x1
+{-# INLINE webSocket_recv #-}
+
+webSocket_open :: Lens' (RawWebSocket t a) (Event t ())
+webSocket_open f (RawWebSocket x1 x2 x3 x4) = (\y -> RawWebSocket x1 y x3 x4) <$> f x2
+{-# INLINE webSocket_open #-}
+
+webSocket_error :: Lens' (RawWebSocket t a) (Event t ())
+webSocket_error f (RawWebSocket x1 x2 x3 x4) = (\y -> RawWebSocket x1 x2 y x4) <$> f x3
+{-# INLINE webSocket_error #-}
+
+webSocket_close :: Lens' (RawWebSocket t a) (Event t (Bool, Word, Text))
+webSocket_close f (RawWebSocket x1 x2 x3 x4) = (\y -> RawWebSocket x1 x2 x3 y) <$> f x4
+{-# INLINE webSocket_close #-}
+
+#endif
+
+--------------------------------------------------------------------------------
+
+2024-07-23 00:44:23.900814 - LLM Prompt: I have the following haskell code, it was suppose to print to the console but it just is not. 
+
+can you instead implement reflex Dynamic with text and put this in a widget and have the text update with logs from the events firing
+
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
+
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Data.Maybe (fromMaybe)
+import qualified GHCJS.DOM.DataTransfer as DOM
+import qualified GHCJS.DOM.Element as DOM
+import qualified GHCJS.DOM.EventM as DOM
+import qualified GHCJS.DOM.GlobalEventHandlers as DOM
+import qualified GHCJS.DOM.HTMLElement as DOM
+import qualified GHCJS.DOM.MouseEvent as DOM
+import qualified GHCJS.DOM.Types as DOM (uncheckedCastTo)
+import Language.Javascript.JSaddle
+import Reflex.Dom
+
+main :: IO ()
+main = mainWidget app
+
+app :: (DomBuilder t m, Prerender t m, MonadIO (Performable m)) => m ()
+app = do
+  -- Set up two draggable items
+  prerender_ blank $ do
+    draggable item1 "a picture"
+    draggable item2 "some code"
+  -- Set up the drop zone and handle drag events
+  out <- handleDragEvents
+  return ()
+
+-- Define the first draggable item (an image)
+item1 :: DomBuilder t m => m (Element EventResult (DomBuilderSpace m) t, ())
+item1 = elAttr' "div" ("draggable" =: "true") $ text "This is a draggable div"
+
+-- Define the second draggable item (a code snippet)
+item2 :: DomBuilder t m => m (Element EventResult (DomBuilderSpace m) t, ())
+item2 =
+  elAttr'
+    "pre"
+    ( "draggable" =: "true"
+        <> "style" =: "-moz-user-select:none;-ms-user-select:none;-webkit-user-select:none;user-select:none;"
+    )
+    $ text "main = putStrLn \"Hello world!\""
+
+-- Function to make an element draggable and attach data to it
+draggable ::
+  ( DomBuilderSpace m ~ GhcjsDomSpace,
+    TriggerEvent t m,
+    MonadJSM m,
+    PerformEvent t m,
+    MonadIO (Performable m)
+  ) =>
+  m (Element EventResult (DomBuilderSpace m) t, ()) ->
+  String ->
+  m ()
+draggable elmnt attachment = do
+  dragsite <- fst <$> elmnt
+  dragStartEvent <- wrapDomEvent
+    (DOM.uncheckedCastTo DOM.HTMLElement $ _element_raw dragsite)
+    (`DOM.on` DOM.dragStart)
+    $ do
+      dt <-
+        fromMaybe (error "no dt?")
+          <$> (DOM.getDataTransfer =<< DOM.event)
+      liftIO $ putStrLn "Drag start event triggered"
+      DOM.setEffectAllowed dt ("all" :: JSString)
+      DOM.setDropEffect dt ("move" :: JSString)
+      DOM.setData
+        dt
+        ("application/x-reflex-description" :: JSString)
+        attachment
+  performEvent_ $ liftIO (putStrLn "Drag started") <$ dragStartEvent
+  return ()
+
+-- Function to handle drag events in the drop zone
+handleDragEvents ::
+  ( DomBuilder t m,
+    Prerender t m,
+    MonadIO (Performable m)
+  ) =>
+  m ()
+handleDragEvents = prerender_ (return ()) $ do
+  let ddEvent ::
+        (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a) ->
+        DOM.EventM e DOM.MouseEvent a
+      ddEvent op = do
+        dt <-
+          fromMaybe (error "no DT?")
+            <$> (DOM.getDataTransfer =<< DOM.event)
+        op dt
+      ddEvent_ ::
+        DOM.EventM e DOM.MouseEvent () ->
+        DOM.EventM e DOM.MouseEvent ()
+      ddEvent_ op = ddEvent (const op)
+
+  rec -- Handle drag enter event to indicate the drop zone is active
+      dragEnterEvent <-
+        wrapDomEvent
+          dsHTMLel
+          (`DOM.on` DOM.dragEnter)
+          (ddEvent_ DOM.preventDefault)
+      performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+
+      -- Handle drag leave event to revert the drop zone style
+      dragLeaveEvent <-
+        wrapDomEvent
+          dsHTMLel
+          (`DOM.on` DOM.dragLeave)
+          (ddEvent_ $ return ())
+      performEvent_ $ liftIO (putStrLn "Drag leave") <$ dragLeaveEvent
+
+      -- Define the drop zone
+      dropsite <- fst <$> elDynAttr' "div" dropsiteAttrs (dynText dropText)
+      let dsHTMLel = DOM.uncheckedCastTo DOM.HTMLElement $ _element_raw dropsite
+      inDrop <-
+        holdDyn False $
+          leftmost
+            [ True <$ dragEnterEvent,
+              False <$ dragLeaveEvent,
+              False <$ dropEvent
+            ]
+      dropsiteAttrs <- return . ffor inDrop $ \case
+        True -> "style" =: "border:1em solid blue;padding:2em;margin:2em;background-color:green;"
+        False -> "style" =: "border:1em solid blue;padding:2em;margin:2em;"
+
+      -- Handle drag over event to allow dropping
+      dragOverEvent <-
+        wrapDomEvent
+          dsHTMLel
+          (`DOM.on` DOM.dragOver)
+          (ddEvent_ DOM.preventDefault)
+      performEvent_ $ liftIO (putStrLn "Drag over") <$ dragOverEvent
+
+      -- Handle drop event to capture dropped data
+      dropEvent <- wrapDomEvent dsHTMLel (`DOM.on` DOM.drop) $
+        ddEvent $ \dt -> do
+          DOM.preventDefault
+          liftIO $ putStrLn "Drop event triggered"
+          DOM.getData dt ("application/x-reflex-description" :: String)
+      performEvent_ $ liftIO (putStrLn "Dropped") <$ dropEvent
+
+      dropText <- holdDyn "Drop here" $ fmap ("Dropped " <>) dropEvent
+  return ()
+
+GPT-4 Response: To implement a `Dynamic` text that updates with logs from the events firing, we can use `holdDyn` to maintain the state of the log messages and update it whenever an event occurs. Here is the modified code:
+
+execute code: 
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
+
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Data.Maybe (fromMaybe)
+import qualified GHCJS.DOM.DataTransfer as DOM
+import qualified GHCJS.DOM.Element as DOM
+import qualified GHCJS.DOM.EventM as DOM
+import qualified GHCJS.DOM.GlobalEventHandlers as DOM
+import qualified GHCJS.DOM.HTMLElement as DOM
+import qualified GHCJS.DOM.MouseEvent as DOM
+import qualified GHCJS.DOM.Types as DOM (uncheckedCastTo)
+import Language.Javascript.JSaddle
+import Reflex.Dom
+
+main :: IO ()
+main = mainWidget app
+
+app :: (DomBuilder t m, Prerender t m, MonadIO (Performable m), PostBuild t m, MonadHold t m) => m ()
+app = do
+  -- Set up two draggable items
+  prerender_ blank $ do
+    draggable item1 "a picture"
+    draggable item2 "some code"
+  -- Set up the drop zone and handle drag events
+  out <- handleDragEvents
+  -- Display the log messages
+  el "div" $ dynText out
+  return ()
+
+-- Define the first draggable item (an image)
+item1 :: DomBuilder t m => m (Element EventResult (DomBuilderSpace m) t, ())
+item1 = elAttr' "div" ("draggable" =: "true") $ text "This is a draggable div"
+
+-- Define the second draggable item (a code snippet)
+item2 :: DomBuilder t m => m (Element EventResult (DomBuilderSpace m) t, ())
+item2 =
+  elAttr'
+    "pre"
+    ( "draggable" =: "true"
+        <> "style" =: "-moz-user-select:none;-ms-user-select:none;-webkit-user-select:none;user-select:none;"
+    )
+    $ text "main = putStrLn \"Hello world!\""
+
+-- Function to make an element draggable and attach data to it
+draggable ::
+  ( DomBuilderSpace m ~ GhcjsDomSpace,
+    TriggerEvent t m,
+    MonadJSM m,
+    PerformEvent t m,
+    MonadIO (Performable m)
+  ) =>
+  m (Element EventResult (DomBuilderSpace m) t, ()) ->
+  String ->
+  m ()
+draggable elmnt attachment = do
+  dragsite <- fst <$> elmnt
+  dragStartEvent <- wrapDomEvent
+    (DOM.uncheckedCastTo DOM.HTMLElement $ _element_raw dragsite)
+    (`DOM.on` DOM.dragStart)
+    $ do
+      dt <-
+        fromMaybe (error "no dt?")
+          <$> (DOM.getDataTransfer =<< DOM.event)
+      liftIO $ putStrLn "Drag start event triggered"
+      DOM.setEffectAllowed dt ("all" :: JSString)
+      DOM.setDropEffect dt ("move" :: JSString)
+      DOM.setData
+        dt
+        ("application/x-reflex-description" :: JSString)
+        attachment
+  performEvent_ $ liftIO (putStrLn "Drag started") <$ dragStartEvent
+  return ()
+
+-- Function to handle drag events in the drop zone
+handleDragEvents ::
+  ( DomBuilder t m,
+    Prerender t m,
+    MonadIO (Performable m),
+    PostBuild t m,
+    MonadHold t m
+  ) =>
+  m (Dynamic t String)
+handleDragEvents = prerender (return $ constDyn "") $ do
+  let ddEvent ::
+        (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a) ->
+        DOM.EventM e DOM.MouseEvent a
+      ddEvent op = do
+        dt <-
+          fromMaybe (error "no DT?")
+            <$> (DOM.getDataTransfer =<< DOM.event)
+        op dt
+      ddEvent_ ::
+        DOM.EventM e DOM.MouseEvent () ->
+        DOM.EventM e DOM.MouseEvent ()
+      ddEvent_ op = ddEvent (const op)
+
+  rec -- Handle drag enter event to indicate the drop zone is active
+      dragEnterEvent <-
+        wrapDomEvent
+          dsHTMLel
+          (`DOM.on` DOM.dragEnter)
+          (ddEvent_ DOM.preventDefault)
+      performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+
+      -- Handle drag leave event to revert the drop zone style
+      dragLeaveEvent <-
+        wrapDomEvent
+          dsHTMLel
+          (`DOM.on` DOM.dragLeave)
+          (ddEvent_ $ return ())
+      performEvent_ $ liftIO (putStrLn "Drag leave") <$ dragLeaveEvent
+
+      -- Define the drop zone
+      dropsite <- fst <$> elDynAttr' "div" dropsiteAttrs (dynText dropText)
+      let dsHTMLel = DOM.uncheckedCastTo DOM.HTMLElement $ _element_raw dropsite
+      inDrop <-
+        holdDyn False $
+          leftmost
+            [ True <$ dragEnterEvent,
+              False <$ dragLeaveEvent,
+              False <$ dropEvent
+            ]
+      dropsiteAttrs <- return . ffor inDrop $ \case
+        True -> "style" =: "border:1em solid blue;padding:2em;margin:2em;background-color:green;"
+        False -> "style" =: "border:1em solid blue;padding:2em;margin:2em;"
+
+      -- Handle drag over event to allow dropping
+      dragOverEvent <-
+        wrapDomEvent
+          dsHTMLel
+          (`DOM.on` DOM.dragOver)
+          (ddEvent_ DOM.preventDefault)
+      performEvent_ $ liftIO (putStrLn "Drag over") <$ dragOverEvent
+
+      -- Handle drop event to capture dropped data
+      dropEvent <- wrapDomEvent dsHTMLel (`DOM.on` DOM.drop) $
+        ddEvent $ \dt -> do
+          DOM.preventDefault
+          liftIO $ putStrLn "Drop event triggered"
+          DOM.getData dt ("application/x-reflex-description" :: String)
+      performEvent_ $ liftIO (putStrLn "Dropped") <$ dropEvent
+
+      dropText <- holdDyn "Drop here" $ fmap ("Dropped " <>) dropEvent
+
+      -- Collect log messages
+      let logMessages = leftmost
+            [ "Drag enter" <$ dragEnterEvent
+            , "Drag leave" <$ dragLeaveEvent
+            , "Drag over" <$ dragOverEvent
+            , "Dropped" <$ dropEvent
+            ]
+      logDyn <- foldDyn (\new old -> old <> "\n" <> new) "" logMessages
+  return logDyn
+2024-07-23 00:44:32.873683 - Execution Output:
+
+Execution Errors:
+this derivation will be built:
+  /nix/store/wi08i1pnc2jzm708fxkaa847xiy4k0sv-frontend-0.1.0.0.drv
+building '/nix/store/wi08i1pnc2jzm708fxkaa847xiy4k0sv-frontend-0.1.0.0.drv'...
+setupCompilerEnvironmentPhase
+Build with /nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7.
+unpacking sources
+unpacking source archive /nix/store/6byd3szl1zsc0nnl0n6x5ffry3rsdzi5-frontend
+source root is frontend
+patching sources
+compileBuildDriverPhase
+setupCompileFlags: -package-db=/build/tmp.CmZ3P7RXjh/setup-package.conf.d -j8 -threaded -rtsopts
+[1 of 1] Compiling Main             ( /nix/store/4mdp8nhyfddh7bllbi7xszz7k9955n79-Setup.hs, /build/tmp.CmZ3P7RXjh/Main.o )
+Linking Setup ...
+updateAutotoolsGnuConfigScriptsPhase
+configuring
+configureFlags: --verbose --prefix=/nix/store/lhdfhkncx030dfcdjp22pi5yxw469xyb-frontend-0.1.0.0 --libdir=$prefix/lib/$compiler --libsubdir=$abi/$libname --docdir=/nix/store/18f9ng4kz8h6kqsspbla5na34ssjfi9d-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0 --package-db=/build/tmp.CmZ3P7RXjh/package.conf.d --ghc-options=-j8 --disable-split-objs --disable-library-profiling --disable-profiling --enable-shared --disable-coverage --enable-static --disable-executable-dynamic --disable-tests --disable-benchmarks --enable-library-vanilla --disable-library-for-ghci --ghc-option=-split-sections --disable-library-stripping --disable-executable-stripping --ghcjs --configure-option=--host=js-unknown-ghcjs --with-ghc=ghcjs --with-ghc-pkg=ghc-pkg --with-gcc=cc --hsc2hs-option=--cross-compile --ghcjs-options=-fexpose-all-unfoldings
+Using Parsec parser
+Configuring frontend-0.1.0.0...
+Warning: Unknown/unsupported 'ghc' version detected (Cabal 3.2.1.0 supports
+'ghc' version < 8.8):
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs is is based
+on GHC version 8.10.7
+Dependency base >=4.14.3.0 && <4.15: using base-4.14.3.0
+Dependency containers -any: using containers-0.6.5.1
+Dependency ghcjs-dom -any: using ghcjs-dom-0.9.4.0
+Dependency jsaddle -any: using jsaddle-0.9.8.2
+Dependency jsaddle-dom -any: using jsaddle-dom-0.9.4.1
+Dependency lens -any: using lens-5.0.1
+Dependency patch -any: using patch-0.0.8.2
+Dependency reflex -any: using reflex-0.9.2.0
+Dependency reflex-dom -any: using reflex-dom-0.6.3.1
+Dependency text ==1.2.*: using text-1.2.4.1
+Dependency time -any: using time-1.9.3
+Source component graph: component exe:frontend
+Configured component graph:
+    component frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Linked component graph:
+    unit frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Ready component graph:
+    definite frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        depends base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        depends containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        depends ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        depends jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        depends jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        depends lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        depends patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        depends reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        depends reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        depends text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        depends time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Using Cabal-3.2.1.0 compiled by ghc-8.10
+Using compiler: ghcjs-8.10.7
+Using install prefix:
+/nix/store/lhdfhkncx030dfcdjp22pi5yxw469xyb-frontend-0.1.0.0
+Executables installed in:
+/nix/store/lhdfhkncx030dfcdjp22pi5yxw469xyb-frontend-0.1.0.0/bin
+Libraries installed in:
+/nix/store/lhdfhkncx030dfcdjp22pi5yxw469xyb-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Dynamic Libraries installed in:
+/nix/store/lhdfhkncx030dfcdjp22pi5yxw469xyb-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7
+Private executables installed in:
+/nix/store/lhdfhkncx030dfcdjp22pi5yxw469xyb-frontend-0.1.0.0/libexec/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Data files installed in:
+/nix/store/lhdfhkncx030dfcdjp22pi5yxw469xyb-frontend-0.1.0.0/share/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Documentation installed in:
+/nix/store/18f9ng4kz8h6kqsspbla5na34ssjfi9d-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0
+Configuration files installed in:
+/nix/store/lhdfhkncx030dfcdjp22pi5yxw469xyb-frontend-0.1.0.0/etc
+No alex found
+Using ar found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ar
+No c2hs found
+No cpphs found
+No doctest found
+Using gcc version 11.3.0 given by user at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/cc
+Using ghc version 8.10.7 given by user at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghc-pkg version 8.10.7 given by user at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/ghc-pkg
+Using ghcjs version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghcjs-pkg version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs-pkg
+No greencard found
+Using haddock version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/haddock
+No happy found
+Using haskell-suite found on system at: haskell-suite-dummy-location
+Using haskell-suite-pkg found on system at: haskell-suite-pkg-dummy-location
+No hmake found
+Using hpc version 0.68 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+Using hsc2hs version 0.68.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+No hscolour found
+No jhc found
+Using ld found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+No pkg-config found
+Using runghc version 8.10.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+Using strip version 2.38 found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+Using tar found on system at:
+/nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+No uhc found
+building
+Preprocessing executable 'frontend' for frontend-0.1.0.0..
+Building executable 'frontend' for frontend-0.1.0.0..
+[1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+
+src/Main.hs:32:22: error:
+    • Couldn't match type ‘[Char]’ with ‘Data.Text.Internal.Text’
+      Expected type: Dynamic t Data.Text.Internal.Text
+        Actual type: Dynamic t String
+    • In the first argument of ‘dynText’, namely ‘out’
+      In the second argument of ‘($)’, namely ‘dynText out’
+      In a stmt of a 'do' block: el "div" $ dynText out
+   |
+32 |   el "div" $ dynText out
+   |                      ^^^
+
+src/Main.hs:88:20: error:
+    • Couldn't match type ‘Dynamic t a0’ with ‘[Char]’
+      Expected type: m (Dynamic t String)
+        Actual type: m (Dynamic t (Dynamic t a0))
+    • In the expression:
+        prerender (return $ constDyn "")
+          $ do let ddEvent ::
+                     (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                     -> DOM.EventM e DOM.MouseEvent a
+                   ddEvent op = ...
+                   ....
+               rec dragEnterEvent <- wrapDomEvent
+                                       dsHTMLel (`DOM.on` DOM.dragEnter)
+                                       (ddEvent_ DOM.preventDefault)
+                   performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                   dragLeaveEvent <- wrapDomEvent
+                                       dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+                   ....
+               return logDyn
+      In an equation for ‘handleDragEvents’:
+          handleDragEvents
+            = prerender (return $ constDyn "")
+                $ do let ddEvent ::
+                           (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                           -> DOM.EventM e DOM.MouseEvent a
+                         ....
+                     rec dragEnterEvent <- wrapDomEvent
+                                             dsHTMLel (`DOM.on` DOM.dragEnter)
+                                             (ddEvent_ DOM.preventDefault)
+                         performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                         ....
+                     return logDyn
+    • Relevant bindings include
+        handleDragEvents :: m (Dynamic t String)
+          (bound at src/Main.hs:88:1)
+   |
+88 | handleDragEvents = prerender (return $ constDyn "") $ do
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+error: builder for '/nix/store/wi08i1pnc2jzm708fxkaa847xiy4k0sv-frontend-0.1.0.0.drv' failed with exit code 1;
+       last 25 log lines:
+       >                    performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                    dragLeaveEvent <- wrapDomEvent
+       >                                        dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+       >                    ....
+       >                return logDyn
+       >       In an equation for ‘handleDragEvents’:
+       >           handleDragEvents
+       >             = prerender (return $ constDyn "")
+       >                 $ do let ddEvent ::
+       >                            (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+       >                            -> DOM.EventM e DOM.MouseEvent a
+       >                          ....
+       >                      rec dragEnterEvent <- wrapDomEvent
+       >                                              dsHTMLel (`DOM.on` DOM.dragEnter)
+       >                                              (ddEvent_ DOM.preventDefault)
+       >                          performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                          ....
+       >                      return logDyn
+       >     • Relevant bindings include
+       >         handleDragEvents :: m (Dynamic t String)
+       >           (bound at src/Main.hs:88:1)
+       >    |
+       > 88 | handleDragEvents = prerender (return $ constDyn "") $ do
+       >    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+       > 
+       For full logs, run 'nix log /nix/store/wi08i1pnc2jzm708fxkaa847xiy4k0sv-frontend-0.1.0.0.drv'.
+
+2024-07-23 00:45:09.115176 - Execution Output:
+
+Execution Errors:
+this derivation will be built:
+  /nix/store/wv2mm0i8n5vjv6r5p09ljiqw2x88g0vj-frontend-0.1.0.0.drv
+building '/nix/store/wv2mm0i8n5vjv6r5p09ljiqw2x88g0vj-frontend-0.1.0.0.drv'...
+setupCompilerEnvironmentPhase
+Build with /nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7.
+unpacking sources
+unpacking source archive /nix/store/13f5wkw6yxqbbkavhi6sndpxm5f8y6gj-frontend
+source root is frontend
+patching sources
+compileBuildDriverPhase
+setupCompileFlags: -package-db=/build/tmp.ehz3F5jrfZ/setup-package.conf.d -j8 -threaded -rtsopts
+[1 of 1] Compiling Main             ( /nix/store/4mdp8nhyfddh7bllbi7xszz7k9955n79-Setup.hs, /build/tmp.ehz3F5jrfZ/Main.o )
+Linking Setup ...
+updateAutotoolsGnuConfigScriptsPhase
+configuring
+configureFlags: --verbose --prefix=/nix/store/drzmr978m1ijrmaj9gy1bxiz4ch98z64-frontend-0.1.0.0 --libdir=$prefix/lib/$compiler --libsubdir=$abi/$libname --docdir=/nix/store/sblj32bdjdq7nmif7krc2avwf2v9qsig-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0 --package-db=/build/tmp.ehz3F5jrfZ/package.conf.d --ghc-options=-j8 --disable-split-objs --disable-library-profiling --disable-profiling --enable-shared --disable-coverage --enable-static --disable-executable-dynamic --disable-tests --disable-benchmarks --enable-library-vanilla --disable-library-for-ghci --ghc-option=-split-sections --disable-library-stripping --disable-executable-stripping --ghcjs --configure-option=--host=js-unknown-ghcjs --with-ghc=ghcjs --with-ghc-pkg=ghc-pkg --with-gcc=cc --hsc2hs-option=--cross-compile --ghcjs-options=-fexpose-all-unfoldings
+Using Parsec parser
+Configuring frontend-0.1.0.0...
+Warning: Unknown/unsupported 'ghc' version detected (Cabal 3.2.1.0 supports
+'ghc' version < 8.8):
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs is is based
+on GHC version 8.10.7
+Dependency base >=4.14.3.0 && <4.15: using base-4.14.3.0
+Dependency containers -any: using containers-0.6.5.1
+Dependency ghcjs-dom -any: using ghcjs-dom-0.9.4.0
+Dependency jsaddle -any: using jsaddle-0.9.8.2
+Dependency jsaddle-dom -any: using jsaddle-dom-0.9.4.1
+Dependency lens -any: using lens-5.0.1
+Dependency patch -any: using patch-0.0.8.2
+Dependency reflex -any: using reflex-0.9.2.0
+Dependency reflex-dom -any: using reflex-dom-0.6.3.1
+Dependency text ==1.2.*: using text-1.2.4.1
+Dependency time -any: using time-1.9.3
+Source component graph: component exe:frontend
+Configured component graph:
+    component frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Linked component graph:
+    unit frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Ready component graph:
+    definite frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        depends base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        depends containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        depends ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        depends jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        depends jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        depends lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        depends patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        depends reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        depends reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        depends text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        depends time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Using Cabal-3.2.1.0 compiled by ghc-8.10
+Using compiler: ghcjs-8.10.7
+Using install prefix:
+/nix/store/drzmr978m1ijrmaj9gy1bxiz4ch98z64-frontend-0.1.0.0
+Executables installed in:
+/nix/store/drzmr978m1ijrmaj9gy1bxiz4ch98z64-frontend-0.1.0.0/bin
+Libraries installed in:
+/nix/store/drzmr978m1ijrmaj9gy1bxiz4ch98z64-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Dynamic Libraries installed in:
+/nix/store/drzmr978m1ijrmaj9gy1bxiz4ch98z64-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7
+Private executables installed in:
+/nix/store/drzmr978m1ijrmaj9gy1bxiz4ch98z64-frontend-0.1.0.0/libexec/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Data files installed in:
+/nix/store/drzmr978m1ijrmaj9gy1bxiz4ch98z64-frontend-0.1.0.0/share/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Documentation installed in:
+/nix/store/sblj32bdjdq7nmif7krc2avwf2v9qsig-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0
+Configuration files installed in:
+/nix/store/drzmr978m1ijrmaj9gy1bxiz4ch98z64-frontend-0.1.0.0/etc
+No alex found
+Using ar found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ar
+No c2hs found
+No cpphs found
+No doctest found
+Using gcc version 11.3.0 given by user at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/cc
+Using ghc version 8.10.7 given by user at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghc-pkg version 8.10.7 given by user at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/ghc-pkg
+Using ghcjs version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghcjs-pkg version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs-pkg
+No greencard found
+Using haddock version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/haddock
+No happy found
+Using haskell-suite found on system at: haskell-suite-dummy-location
+Using haskell-suite-pkg found on system at: haskell-suite-pkg-dummy-location
+No hmake found
+Using hpc version 0.68 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+Using hsc2hs version 0.68.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+No hscolour found
+No jhc found
+Using ld found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+No pkg-config found
+Using runghc version 8.10.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+Using strip version 2.38 found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+Using tar found on system at:
+/nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+No uhc found
+building
+Preprocessing executable 'frontend' for frontend-0.1.0.0..
+Building executable 'frontend' for frontend-0.1.0.0..
+[1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+
+src/Main.hs:89:20: error:
+    • Couldn't match type ‘Dynamic t Text’ with ‘Text’
+      Expected type: m (Dynamic t Text)
+        Actual type: m (Dynamic t (Dynamic t Text))
+    • In the expression:
+        prerender (return $ constDyn "")
+          $ do let ddEvent ::
+                     (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                     -> DOM.EventM e DOM.MouseEvent a
+                   ddEvent op = ...
+                   ....
+               rec dragEnterEvent <- wrapDomEvent
+                                       dsHTMLel (`DOM.on` DOM.dragEnter)
+                                       (ddEvent_ DOM.preventDefault)
+                   performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                   dragLeaveEvent <- wrapDomEvent
+                                       dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+                   ....
+               return logDyn
+      In an equation for ‘handleDragEvents’:
+          handleDragEvents
+            = prerender (return $ constDyn "")
+                $ do let ddEvent ::
+                           (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                           -> DOM.EventM e DOM.MouseEvent a
+                         ....
+                     rec dragEnterEvent <- wrapDomEvent
+                                             dsHTMLel (`DOM.on` DOM.dragEnter)
+                                             (ddEvent_ DOM.preventDefault)
+                         performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                         ....
+                     return logDyn
+    • Relevant bindings include
+        handleDragEvents :: m (Dynamic t Text) (bound at src/Main.hs:89:1)
+   |
+89 | handleDragEvents = prerender (return $ constDyn "") $ do
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+error: builder for '/nix/store/wv2mm0i8n5vjv6r5p09ljiqw2x88g0vj-frontend-0.1.0.0.drv' failed with exit code 1;
+       last 25 log lines:
+       >                                        (ddEvent_ DOM.preventDefault)
+       >                    performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                    dragLeaveEvent <- wrapDomEvent
+       >                                        dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+       >                    ....
+       >                return logDyn
+       >       In an equation for ‘handleDragEvents’:
+       >           handleDragEvents
+       >             = prerender (return $ constDyn "")
+       >                 $ do let ddEvent ::
+       >                            (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+       >                            -> DOM.EventM e DOM.MouseEvent a
+       >                          ....
+       >                      rec dragEnterEvent <- wrapDomEvent
+       >                                              dsHTMLel (`DOM.on` DOM.dragEnter)
+       >                                              (ddEvent_ DOM.preventDefault)
+       >                          performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                          ....
+       >                      return logDyn
+       >     • Relevant bindings include
+       >         handleDragEvents :: m (Dynamic t Text) (bound at src/Main.hs:89:1)
+       >    |
+       > 89 | handleDragEvents = prerender (return $ constDyn "") $ do
+       >    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+       > 
+       For full logs, run 'nix log /nix/store/wv2mm0i8n5vjv6r5p09ljiqw2x88g0vj-frontend-0.1.0.0.drv'.
+
+2024-07-23 00:45:43.958596 - Execution Output:
+
+Execution Errors:
+this derivation will be built:
+  /nix/store/2awj04ncgr7g7a8gcjfp4l6jf4qi4fmj-frontend-0.1.0.0.drv
+building '/nix/store/2awj04ncgr7g7a8gcjfp4l6jf4qi4fmj-frontend-0.1.0.0.drv'...
+setupCompilerEnvironmentPhase
+Build with /nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7.
+unpacking sources
+unpacking source archive /nix/store/kd5c05dacs4w1d3k892193mdy2wm02ma-frontend
+source root is frontend
+patching sources
+compileBuildDriverPhase
+setupCompileFlags: -package-db=/build/tmp.CFaHOqoNWm/setup-package.conf.d -j8 -threaded -rtsopts
+[1 of 1] Compiling Main             ( /nix/store/4mdp8nhyfddh7bllbi7xszz7k9955n79-Setup.hs, /build/tmp.CFaHOqoNWm/Main.o )
+Linking Setup ...
+updateAutotoolsGnuConfigScriptsPhase
+configuring
+configureFlags: --verbose --prefix=/nix/store/v09qsd5liwn1zlayvl6nmnmd3hnb4v41-frontend-0.1.0.0 --libdir=$prefix/lib/$compiler --libsubdir=$abi/$libname --docdir=/nix/store/3jsc90gnah8k62rjwbqnrsl40w035p2l-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0 --package-db=/build/tmp.CFaHOqoNWm/package.conf.d --ghc-options=-j8 --disable-split-objs --disable-library-profiling --disable-profiling --enable-shared --disable-coverage --enable-static --disable-executable-dynamic --disable-tests --disable-benchmarks --enable-library-vanilla --disable-library-for-ghci --ghc-option=-split-sections --disable-library-stripping --disable-executable-stripping --ghcjs --configure-option=--host=js-unknown-ghcjs --with-ghc=ghcjs --with-ghc-pkg=ghc-pkg --with-gcc=cc --hsc2hs-option=--cross-compile --ghcjs-options=-fexpose-all-unfoldings
+Using Parsec parser
+Configuring frontend-0.1.0.0...
+Warning: Unknown/unsupported 'ghc' version detected (Cabal 3.2.1.0 supports
+'ghc' version < 8.8):
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs is is based
+on GHC version 8.10.7
+Dependency base >=4.14.3.0 && <4.15: using base-4.14.3.0
+Dependency containers -any: using containers-0.6.5.1
+Dependency ghcjs-dom -any: using ghcjs-dom-0.9.4.0
+Dependency jsaddle -any: using jsaddle-0.9.8.2
+Dependency jsaddle-dom -any: using jsaddle-dom-0.9.4.1
+Dependency lens -any: using lens-5.0.1
+Dependency patch -any: using patch-0.0.8.2
+Dependency reflex -any: using reflex-0.9.2.0
+Dependency reflex-dom -any: using reflex-dom-0.6.3.1
+Dependency text ==1.2.*: using text-1.2.4.1
+Dependency time -any: using time-1.9.3
+Source component graph: component exe:frontend
+Configured component graph:
+    component frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Linked component graph:
+    unit frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Ready component graph:
+    definite frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        depends base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        depends containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        depends ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        depends jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        depends jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        depends lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        depends patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        depends reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        depends reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        depends text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        depends time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Using Cabal-3.2.1.0 compiled by ghc-8.10
+Using compiler: ghcjs-8.10.7
+Using install prefix:
+/nix/store/v09qsd5liwn1zlayvl6nmnmd3hnb4v41-frontend-0.1.0.0
+Executables installed in:
+/nix/store/v09qsd5liwn1zlayvl6nmnmd3hnb4v41-frontend-0.1.0.0/bin
+Libraries installed in:
+/nix/store/v09qsd5liwn1zlayvl6nmnmd3hnb4v41-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Dynamic Libraries installed in:
+/nix/store/v09qsd5liwn1zlayvl6nmnmd3hnb4v41-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7
+Private executables installed in:
+/nix/store/v09qsd5liwn1zlayvl6nmnmd3hnb4v41-frontend-0.1.0.0/libexec/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Data files installed in:
+/nix/store/v09qsd5liwn1zlayvl6nmnmd3hnb4v41-frontend-0.1.0.0/share/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Documentation installed in:
+/nix/store/3jsc90gnah8k62rjwbqnrsl40w035p2l-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0
+Configuration files installed in:
+/nix/store/v09qsd5liwn1zlayvl6nmnmd3hnb4v41-frontend-0.1.0.0/etc
+No alex found
+Using ar found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ar
+No c2hs found
+No cpphs found
+No doctest found
+Using gcc version 11.3.0 given by user at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/cc
+Using ghc version 8.10.7 given by user at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghc-pkg version 8.10.7 given by user at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/ghc-pkg
+Using ghcjs version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghcjs-pkg version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs-pkg
+No greencard found
+Using haddock version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/haddock
+No happy found
+Using haskell-suite found on system at: haskell-suite-dummy-location
+Using haskell-suite-pkg found on system at: haskell-suite-pkg-dummy-location
+No hmake found
+Using hpc version 0.68 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+Using hsc2hs version 0.68.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+No hscolour found
+No jhc found
+Using ld found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+No pkg-config found
+Using runghc version 8.10.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+Using strip version 2.38 found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+Using tar found on system at:
+/nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+No uhc found
+building
+Preprocessing executable 'frontend' for frontend-0.1.0.0..
+Building executable 'frontend' for frontend-0.1.0.0..
+[1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+
+src/Main.hs:161:52: error:
+    parse error (possibly incorrect indentation or mismatched brackets)
+    |
+161 |       logDyn <- foldDyn (\new old -> old <> "\n" <>
+    |                                                    ^
+
+error: builder for '/nix/store/2awj04ncgr7g7a8gcjfp4l6jf4qi4fmj-frontend-0.1.0.0.drv' failed with exit code 1;
+       last 25 log lines:
+       > Using hsc2hs version 0.68.7 found on system at:
+       > /nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+       > No hscolour found
+       > No jhc found
+       > Using ld found on system at:
+       > /nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+       > No pkg-config found
+       > Using runghc version 8.10.7 found on system at:
+       > /nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+       > Using strip version 2.38 found on system at:
+       > /nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+       > Using tar found on system at:
+       > /nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+       > No uhc found
+       > building
+       > Preprocessing executable 'frontend' for frontend-0.1.0.0..
+       > Building executable 'frontend' for frontend-0.1.0.0..
+       > [1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+       >
+       > src/Main.hs:161:52: error:
+       >     parse error (possibly incorrect indentation or mismatched brackets)
+       >     |
+       > 161 |       logDyn <- foldDyn (\new old -> old <> "\n" <>
+       >     |                                                    ^
+       > 
+       For full logs, run 'nix log /nix/store/2awj04ncgr7g7a8gcjfp4l6jf4qi4fmj-frontend-0.1.0.0.drv'.
+
+2024-07-23 00:46:13.216977 - Execution Output:
+
+Execution Errors:
+this derivation will be built:
+  /nix/store/bsb8v0nr8fsjbvnpsvaply6q2wgpp5mx-frontend-0.1.0.0.drv
+building '/nix/store/bsb8v0nr8fsjbvnpsvaply6q2wgpp5mx-frontend-0.1.0.0.drv'...
+setupCompilerEnvironmentPhase
+Build with /nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7.
+unpacking sources
+unpacking source archive /nix/store/4x9q808k3ymlvsk4v6w80xr5lxrj4j9q-frontend
+source root is frontend
+patching sources
+compileBuildDriverPhase
+setupCompileFlags: -package-db=/build/tmp.j2osTpuC65/setup-package.conf.d -j8 -threaded -rtsopts
+[1 of 1] Compiling Main             ( /nix/store/4mdp8nhyfddh7bllbi7xszz7k9955n79-Setup.hs, /build/tmp.j2osTpuC65/Main.o )
+Linking Setup ...
+updateAutotoolsGnuConfigScriptsPhase
+configuring
+configureFlags: --verbose --prefix=/nix/store/yy1jissp42q7l1l3khamn0cjs9qmphai-frontend-0.1.0.0 --libdir=$prefix/lib/$compiler --libsubdir=$abi/$libname --docdir=/nix/store/c2c8is698gavszcp5j19jvd7iq549r00-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0 --package-db=/build/tmp.j2osTpuC65/package.conf.d --ghc-options=-j8 --disable-split-objs --disable-library-profiling --disable-profiling --enable-shared --disable-coverage --enable-static --disable-executable-dynamic --disable-tests --disable-benchmarks --enable-library-vanilla --disable-library-for-ghci --ghc-option=-split-sections --disable-library-stripping --disable-executable-stripping --ghcjs --configure-option=--host=js-unknown-ghcjs --with-ghc=ghcjs --with-ghc-pkg=ghc-pkg --with-gcc=cc --hsc2hs-option=--cross-compile --ghcjs-options=-fexpose-all-unfoldings
+Using Parsec parser
+Configuring frontend-0.1.0.0...
+Warning: Unknown/unsupported 'ghc' version detected (Cabal 3.2.1.0 supports
+'ghc' version < 8.8):
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs is is based
+on GHC version 8.10.7
+Dependency base >=4.14.3.0 && <4.15: using base-4.14.3.0
+Dependency containers -any: using containers-0.6.5.1
+Dependency ghcjs-dom -any: using ghcjs-dom-0.9.4.0
+Dependency jsaddle -any: using jsaddle-0.9.8.2
+Dependency jsaddle-dom -any: using jsaddle-dom-0.9.4.1
+Dependency lens -any: using lens-5.0.1
+Dependency patch -any: using patch-0.0.8.2
+Dependency reflex -any: using reflex-0.9.2.0
+Dependency reflex-dom -any: using reflex-dom-0.6.3.1
+Dependency text ==1.2.*: using text-1.2.4.1
+Dependency time -any: using time-1.9.3
+Source component graph: component exe:frontend
+Configured component graph:
+    component frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Linked component graph:
+    unit frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Ready component graph:
+    definite frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        depends base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        depends containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        depends ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        depends jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        depends jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        depends lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        depends patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        depends reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        depends reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        depends text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        depends time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Using Cabal-3.2.1.0 compiled by ghc-8.10
+Using compiler: ghcjs-8.10.7
+Using install prefix:
+/nix/store/yy1jissp42q7l1l3khamn0cjs9qmphai-frontend-0.1.0.0
+Executables installed in:
+/nix/store/yy1jissp42q7l1l3khamn0cjs9qmphai-frontend-0.1.0.0/bin
+Libraries installed in:
+/nix/store/yy1jissp42q7l1l3khamn0cjs9qmphai-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Dynamic Libraries installed in:
+/nix/store/yy1jissp42q7l1l3khamn0cjs9qmphai-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7
+Private executables installed in:
+/nix/store/yy1jissp42q7l1l3khamn0cjs9qmphai-frontend-0.1.0.0/libexec/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Data files installed in:
+/nix/store/yy1jissp42q7l1l3khamn0cjs9qmphai-frontend-0.1.0.0/share/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Documentation installed in:
+/nix/store/c2c8is698gavszcp5j19jvd7iq549r00-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0
+Configuration files installed in:
+/nix/store/yy1jissp42q7l1l3khamn0cjs9qmphai-frontend-0.1.0.0/etc
+No alex found
+Using ar found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ar
+No c2hs found
+No cpphs found
+No doctest found
+Using gcc version 11.3.0 given by user at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/cc
+Using ghc version 8.10.7 given by user at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghc-pkg version 8.10.7 given by user at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/ghc-pkg
+Using ghcjs version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghcjs-pkg version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs-pkg
+No greencard found
+Using haddock version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/haddock
+No happy found
+Using haskell-suite found on system at: haskell-suite-dummy-location
+Using haskell-suite-pkg found on system at: haskell-suite-pkg-dummy-location
+No hmake found
+Using hpc version 0.68 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+Using hsc2hs version 0.68.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+No hscolour found
+No jhc found
+Using ld found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+No pkg-config found
+Using runghc version 8.10.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+Using strip version 2.38 found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+Using tar found on system at:
+/nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+No uhc found
+building
+Preprocessing executable 'frontend' for frontend-0.1.0.0..
+Building executable 'frontend' for frontend-0.1.0.0..
+[1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+
+src/Main.hs:21:24: error:
+    Module ‘Reflex.Dynamic’ does not export ‘joinDynThroughDyn’
+   |
+21 | import Reflex.Dynamic (joinDynThroughDyn)
+   |                        ^^^^^^^^^^^^^^^^^
+
+error: builder for '/nix/store/bsb8v0nr8fsjbvnpsvaply6q2wgpp5mx-frontend-0.1.0.0.drv' failed with exit code 1;
+       last 25 log lines:
+       > Using hsc2hs version 0.68.7 found on system at:
+       > /nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+       > No hscolour found
+       > No jhc found
+       > Using ld found on system at:
+       > /nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+       > No pkg-config found
+       > Using runghc version 8.10.7 found on system at:
+       > /nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+       > Using strip version 2.38 found on system at:
+       > /nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+       > Using tar found on system at:
+       > /nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+       > No uhc found
+       > building
+       > Preprocessing executable 'frontend' for frontend-0.1.0.0..
+       > Building executable 'frontend' for frontend-0.1.0.0..
+       > [1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+       >
+       > src/Main.hs:21:24: error:
+       >     Module ‘Reflex.Dynamic’ does not export ‘joinDynThroughDyn’
+       >    |
+       > 21 | import Reflex.Dynamic (joinDynThroughDyn)
+       >    |                        ^^^^^^^^^^^^^^^^^
+       > 
+       For full logs, run 'nix log /nix/store/bsb8v0nr8fsjbvnpsvaply6q2wgpp5mx-frontend-0.1.0.0.drv'.
+
+2024-07-23 00:46:53.523522 - Execution Output:
+
+Execution Errors:
+this derivation will be built:
+  /nix/store/143b1kf6fs915rmqgzjk9pppvr9lwd04-frontend-0.1.0.0.drv
+building '/nix/store/143b1kf6fs915rmqgzjk9pppvr9lwd04-frontend-0.1.0.0.drv'...
+setupCompilerEnvironmentPhase
+Build with /nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7.
+unpacking sources
+unpacking source archive /nix/store/7i21g7c88j58pfz2i2h0fw2xwq3xni2p-frontend
+source root is frontend
+patching sources
+compileBuildDriverPhase
+setupCompileFlags: -package-db=/build/tmp.1UNabz3xX2/setup-package.conf.d -j8 -threaded -rtsopts
+[1 of 1] Compiling Main             ( /nix/store/4mdp8nhyfddh7bllbi7xszz7k9955n79-Setup.hs, /build/tmp.1UNabz3xX2/Main.o )
+Linking Setup ...
+updateAutotoolsGnuConfigScriptsPhase
+configuring
+configureFlags: --verbose --prefix=/nix/store/8kalccgrhmsfq3ym8l96x1f2l464nar4-frontend-0.1.0.0 --libdir=$prefix/lib/$compiler --libsubdir=$abi/$libname --docdir=/nix/store/v1zsi4ilyvinr674if90zwzr2i2ipsss-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0 --package-db=/build/tmp.1UNabz3xX2/package.conf.d --ghc-options=-j8 --disable-split-objs --disable-library-profiling --disable-profiling --enable-shared --disable-coverage --enable-static --disable-executable-dynamic --disable-tests --disable-benchmarks --enable-library-vanilla --disable-library-for-ghci --ghc-option=-split-sections --disable-library-stripping --disable-executable-stripping --ghcjs --configure-option=--host=js-unknown-ghcjs --with-ghc=ghcjs --with-ghc-pkg=ghc-pkg --with-gcc=cc --hsc2hs-option=--cross-compile --ghcjs-options=-fexpose-all-unfoldings
+Using Parsec parser
+Configuring frontend-0.1.0.0...
+Warning: Unknown/unsupported 'ghc' version detected (Cabal 3.2.1.0 supports
+'ghc' version < 8.8):
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs is is based
+on GHC version 8.10.7
+Dependency base >=4.14.3.0 && <4.15: using base-4.14.3.0
+Dependency containers -any: using containers-0.6.5.1
+Dependency ghcjs-dom -any: using ghcjs-dom-0.9.4.0
+Dependency jsaddle -any: using jsaddle-0.9.8.2
+Dependency jsaddle-dom -any: using jsaddle-dom-0.9.4.1
+Dependency lens -any: using lens-5.0.1
+Dependency patch -any: using patch-0.0.8.2
+Dependency reflex -any: using reflex-0.9.2.0
+Dependency reflex-dom -any: using reflex-dom-0.6.3.1
+Dependency text ==1.2.*: using text-1.2.4.1
+Dependency time -any: using time-1.9.3
+Source component graph: component exe:frontend
+Configured component graph:
+    component frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Linked component graph:
+    unit frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Ready component graph:
+    definite frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        depends base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        depends containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        depends ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        depends jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        depends jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        depends lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        depends patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        depends reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        depends reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        depends text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        depends time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Using Cabal-3.2.1.0 compiled by ghc-8.10
+Using compiler: ghcjs-8.10.7
+Using install prefix:
+/nix/store/8kalccgrhmsfq3ym8l96x1f2l464nar4-frontend-0.1.0.0
+Executables installed in:
+/nix/store/8kalccgrhmsfq3ym8l96x1f2l464nar4-frontend-0.1.0.0/bin
+Libraries installed in:
+/nix/store/8kalccgrhmsfq3ym8l96x1f2l464nar4-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Dynamic Libraries installed in:
+/nix/store/8kalccgrhmsfq3ym8l96x1f2l464nar4-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7
+Private executables installed in:
+/nix/store/8kalccgrhmsfq3ym8l96x1f2l464nar4-frontend-0.1.0.0/libexec/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Data files installed in:
+/nix/store/8kalccgrhmsfq3ym8l96x1f2l464nar4-frontend-0.1.0.0/share/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Documentation installed in:
+/nix/store/v1zsi4ilyvinr674if90zwzr2i2ipsss-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0
+Configuration files installed in:
+/nix/store/8kalccgrhmsfq3ym8l96x1f2l464nar4-frontend-0.1.0.0/etc
+No alex found
+Using ar found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ar
+No c2hs found
+No cpphs found
+No doctest found
+Using gcc version 11.3.0 given by user at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/cc
+Using ghc version 8.10.7 given by user at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghc-pkg version 8.10.7 given by user at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/ghc-pkg
+Using ghcjs version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghcjs-pkg version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs-pkg
+No greencard found
+Using haddock version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/haddock
+No happy found
+Using haskell-suite found on system at: haskell-suite-dummy-location
+Using haskell-suite-pkg found on system at: haskell-suite-pkg-dummy-location
+No hmake found
+Using hpc version 0.68 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+Using hsc2hs version 0.68.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+No hscolour found
+No jhc found
+Using ld found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+No pkg-config found
+Using runghc version 8.10.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+Using strip version 2.38 found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+Using tar found on system at:
+/nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+No uhc found
+building
+Preprocessing executable 'frontend' for frontend-0.1.0.0..
+Building executable 'frontend' for frontend-0.1.0.0..
+[1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+
+src/Main.hs:21:16: error: Module ‘Reflex’ does not export ‘join’
+   |
+21 | import Reflex (join)
+   |                ^^^^
+
+error: builder for '/nix/store/143b1kf6fs915rmqgzjk9pppvr9lwd04-frontend-0.1.0.0.drv' failed with exit code 1;
+       last 25 log lines:
+       > /nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+       > Using hsc2hs version 0.68.7 found on system at:
+       > /nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+       > No hscolour found
+       > No jhc found
+       > Using ld found on system at:
+       > /nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+       > No pkg-config found
+       > Using runghc version 8.10.7 found on system at:
+       > /nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+       > Using strip version 2.38 found on system at:
+       > /nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+       > Using tar found on system at:
+       > /nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+       > No uhc found
+       > building
+       > Preprocessing executable 'frontend' for frontend-0.1.0.0..
+       > Building executable 'frontend' for frontend-0.1.0.0..
+       > [1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+       >
+       > src/Main.hs:21:16: error: Module ‘Reflex’ does not export ‘join’
+       >    |
+       > 21 | import Reflex (join)
+       >    |                ^^^^
+       > 
+       For full logs, run 'nix log /nix/store/143b1kf6fs915rmqgzjk9pppvr9lwd04-frontend-0.1.0.0.drv'.
+
+2024-07-23 00:47:32.130788 - Execution Output:
+
+Execution Errors:
+this derivation will be built:
+  /nix/store/m3w85hvrh3x57adnc9cba49vyx0vm17i-frontend-0.1.0.0.drv
+building '/nix/store/m3w85hvrh3x57adnc9cba49vyx0vm17i-frontend-0.1.0.0.drv'...
+setupCompilerEnvironmentPhase
+Build with /nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7.
+unpacking sources
+unpacking source archive /nix/store/qa456jr0qxs1ihvznk1vv4a6d2b3a183-frontend
+source root is frontend
+patching sources
+compileBuildDriverPhase
+setupCompileFlags: -package-db=/build/tmp.WznZjH4ZJk/setup-package.conf.d -j8 -threaded -rtsopts
+[1 of 1] Compiling Main             ( /nix/store/4mdp8nhyfddh7bllbi7xszz7k9955n79-Setup.hs, /build/tmp.WznZjH4ZJk/Main.o )
+Linking Setup ...
+updateAutotoolsGnuConfigScriptsPhase
+configuring
+configureFlags: --verbose --prefix=/nix/store/nflj605mkwpar4ajs6lra4asiz3plnc3-frontend-0.1.0.0 --libdir=$prefix/lib/$compiler --libsubdir=$abi/$libname --docdir=/nix/store/fkmmfnw35za7l8ssxaai8jr78w3wm318-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0 --package-db=/build/tmp.WznZjH4ZJk/package.conf.d --ghc-options=-j8 --disable-split-objs --disable-library-profiling --disable-profiling --enable-shared --disable-coverage --enable-static --disable-executable-dynamic --disable-tests --disable-benchmarks --enable-library-vanilla --disable-library-for-ghci --ghc-option=-split-sections --disable-library-stripping --disable-executable-stripping --ghcjs --configure-option=--host=js-unknown-ghcjs --with-ghc=ghcjs --with-ghc-pkg=ghc-pkg --with-gcc=cc --hsc2hs-option=--cross-compile --ghcjs-options=-fexpose-all-unfoldings
+Using Parsec parser
+Configuring frontend-0.1.0.0...
+Warning: Unknown/unsupported 'ghc' version detected (Cabal 3.2.1.0 supports
+'ghc' version < 8.8):
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs is is based
+on GHC version 8.10.7
+Dependency base >=4.14.3.0 && <4.15: using base-4.14.3.0
+Dependency containers -any: using containers-0.6.5.1
+Dependency ghcjs-dom -any: using ghcjs-dom-0.9.4.0
+Dependency jsaddle -any: using jsaddle-0.9.8.2
+Dependency jsaddle-dom -any: using jsaddle-dom-0.9.4.1
+Dependency lens -any: using lens-5.0.1
+Dependency patch -any: using patch-0.0.8.2
+Dependency reflex -any: using reflex-0.9.2.0
+Dependency reflex-dom -any: using reflex-dom-0.6.3.1
+Dependency text ==1.2.*: using text-1.2.4.1
+Dependency time -any: using time-1.9.3
+Source component graph: component exe:frontend
+Configured component graph:
+    component frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Linked component graph:
+    unit frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Ready component graph:
+    definite frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        depends base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        depends containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        depends ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        depends jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        depends jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        depends lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        depends patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        depends reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        depends reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        depends text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        depends time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Using Cabal-3.2.1.0 compiled by ghc-8.10
+Using compiler: ghcjs-8.10.7
+Using install prefix:
+/nix/store/nflj605mkwpar4ajs6lra4asiz3plnc3-frontend-0.1.0.0
+Executables installed in:
+/nix/store/nflj605mkwpar4ajs6lra4asiz3plnc3-frontend-0.1.0.0/bin
+Libraries installed in:
+/nix/store/nflj605mkwpar4ajs6lra4asiz3plnc3-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Dynamic Libraries installed in:
+/nix/store/nflj605mkwpar4ajs6lra4asiz3plnc3-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7
+Private executables installed in:
+/nix/store/nflj605mkwpar4ajs6lra4asiz3plnc3-frontend-0.1.0.0/libexec/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Data files installed in:
+/nix/store/nflj605mkwpar4ajs6lra4asiz3plnc3-frontend-0.1.0.0/share/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Documentation installed in:
+/nix/store/fkmmfnw35za7l8ssxaai8jr78w3wm318-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0
+Configuration files installed in:
+/nix/store/nflj605mkwpar4ajs6lra4asiz3plnc3-frontend-0.1.0.0/etc
+No alex found
+Using ar found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ar
+No c2hs found
+No cpphs found
+No doctest found
+Using gcc version 11.3.0 given by user at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/cc
+Using ghc version 8.10.7 given by user at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghc-pkg version 8.10.7 given by user at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/ghc-pkg
+Using ghcjs version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghcjs-pkg version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs-pkg
+No greencard found
+Using haddock version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/haddock
+No happy found
+Using haskell-suite found on system at: haskell-suite-dummy-location
+Using haskell-suite-pkg found on system at: haskell-suite-pkg-dummy-location
+No hmake found
+Using hpc version 0.68 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+Using hsc2hs version 0.68.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+No hscolour found
+No jhc found
+Using ld found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+No pkg-config found
+Using runghc version 8.10.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+Using strip version 2.38 found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+Using tar found on system at:
+/nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+No uhc found
+building
+Preprocessing executable 'frontend' for frontend-0.1.0.0..
+Building executable 'frontend' for frontend-0.1.0.0..
+[1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+
+src/Main.hs:21:24: error:
+    Module ‘Reflex.Dynamic’ does not export ‘joinDyn’
+   |
+21 | import Reflex.Dynamic (joinDyn)
+   |                        ^^^^^^^
+
+error: builder for '/nix/store/m3w85hvrh3x57adnc9cba49vyx0vm17i-frontend-0.1.0.0.drv' failed with exit code 1;
+       last 25 log lines:
+       > Using hsc2hs version 0.68.7 found on system at:
+       > /nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+       > No hscolour found
+       > No jhc found
+       > Using ld found on system at:
+       > /nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+       > No pkg-config found
+       > Using runghc version 8.10.7 found on system at:
+       > /nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+       > Using strip version 2.38 found on system at:
+       > /nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+       > Using tar found on system at:
+       > /nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+       > No uhc found
+       > building
+       > Preprocessing executable 'frontend' for frontend-0.1.0.0..
+       > Building executable 'frontend' for frontend-0.1.0.0..
+       > [1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+       >
+       > src/Main.hs:21:24: error:
+       >     Module ‘Reflex.Dynamic’ does not export ‘joinDyn’
+       >    |
+       > 21 | import Reflex.Dynamic (joinDyn)
+       >    |                        ^^^^^^^
+       > 
+       For full logs, run 'nix log /nix/store/m3w85hvrh3x57adnc9cba49vyx0vm17i-frontend-0.1.0.0.drv'.
+
+2024-07-23 00:48:40.653821 - Execution Output:
+
+Execution Errors:
+this derivation will be built:
+  /nix/store/hrprg6iybnpr1pivrncc9j7j19c3rykd-frontend-0.1.0.0.drv
+building '/nix/store/hrprg6iybnpr1pivrncc9j7j19c3rykd-frontend-0.1.0.0.drv'...
+setupCompilerEnvironmentPhase
+Build with /nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7.
+unpacking sources
+unpacking source archive /nix/store/26jryd1xjz7jfj47h61ahn189brww4p9-frontend
+source root is frontend
+patching sources
+compileBuildDriverPhase
+setupCompileFlags: -package-db=/build/tmp.8rdtTwfS5L/setup-package.conf.d -j8 -threaded -rtsopts
+[1 of 1] Compiling Main             ( /nix/store/4mdp8nhyfddh7bllbi7xszz7k9955n79-Setup.hs, /build/tmp.8rdtTwfS5L/Main.o )
+Linking Setup ...
+updateAutotoolsGnuConfigScriptsPhase
+configuring
+configureFlags: --verbose --prefix=/nix/store/isv2pqfbanv9lf4svbdz88pwf3djkrkv-frontend-0.1.0.0 --libdir=$prefix/lib/$compiler --libsubdir=$abi/$libname --docdir=/nix/store/1ka9wxv9hx9pdk6v6g8ll8d4cc637il1-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0 --package-db=/build/tmp.8rdtTwfS5L/package.conf.d --ghc-options=-j8 --disable-split-objs --disable-library-profiling --disable-profiling --enable-shared --disable-coverage --enable-static --disable-executable-dynamic --disable-tests --disable-benchmarks --enable-library-vanilla --disable-library-for-ghci --ghc-option=-split-sections --disable-library-stripping --disable-executable-stripping --ghcjs --configure-option=--host=js-unknown-ghcjs --with-ghc=ghcjs --with-ghc-pkg=ghc-pkg --with-gcc=cc --hsc2hs-option=--cross-compile --ghcjs-options=-fexpose-all-unfoldings
+Using Parsec parser
+Configuring frontend-0.1.0.0...
+Warning: Unknown/unsupported 'ghc' version detected (Cabal 3.2.1.0 supports
+'ghc' version < 8.8):
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs is is based
+on GHC version 8.10.7
+Dependency base >=4.14.3.0 && <4.15: using base-4.14.3.0
+Dependency containers -any: using containers-0.6.5.1
+Dependency ghcjs-dom -any: using ghcjs-dom-0.9.4.0
+Dependency jsaddle -any: using jsaddle-0.9.8.2
+Dependency jsaddle-dom -any: using jsaddle-dom-0.9.4.1
+Dependency lens -any: using lens-5.0.1
+Dependency patch -any: using patch-0.0.8.2
+Dependency reflex -any: using reflex-0.9.2.0
+Dependency reflex-dom -any: using reflex-dom-0.6.3.1
+Dependency text ==1.2.*: using text-1.2.4.1
+Dependency time -any: using time-1.9.3
+Source component graph: component exe:frontend
+Configured component graph:
+    component frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Linked component graph:
+    unit frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        include base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        include containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        include ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        include jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        include jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        include lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        include patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        include reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        include reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        include text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        include time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Ready component graph:
+    definite frontend-0.1.0.0-9Ux2NuQUSCxFsI8VurZafk-frontend
+        depends base-4.14.3.0-D0KSEBqJsPj2jV088Mzd5k
+        depends containers-0.6.5.1-Jb3F8jbyqRBHMHVa9Whe7M
+        depends ghcjs-dom-0.9.4.0-7D07xJnME4h8365CyighbD
+        depends jsaddle-0.9.8.2-DOc5JA9qWKc32sVbaacOyT
+        depends jsaddle-dom-0.9.4.1-HzVSAbsNXFkEBqqbuDHAoD
+        depends lens-5.0.1-GeIFvbyz2Cy6eIMcGBgWDo
+        depends patch-0.0.8.2-xkFqRtYG48CECJTIsI2Tf
+        depends reflex-0.9.2.0-H5N7cDK9stQEp1UcDEHTtO
+        depends reflex-dom-0.6.3.1-CFudMpsRYLQ1FGN5ho4SWm
+        depends text-1.2.4.1-6uG5rVV50DlG3V1Irt2qJZ
+        depends time-1.9.3-3RdsewIylHjEX08tJ1SRQd
+Using Cabal-3.2.1.0 compiled by ghc-8.10
+Using compiler: ghcjs-8.10.7
+Using install prefix:
+/nix/store/isv2pqfbanv9lf4svbdz88pwf3djkrkv-frontend-0.1.0.0
+Executables installed in:
+/nix/store/isv2pqfbanv9lf4svbdz88pwf3djkrkv-frontend-0.1.0.0/bin
+Libraries installed in:
+/nix/store/isv2pqfbanv9lf4svbdz88pwf3djkrkv-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Dynamic Libraries installed in:
+/nix/store/isv2pqfbanv9lf4svbdz88pwf3djkrkv-frontend-0.1.0.0/lib/ghcjs-8.10.7/js-ghcjs-ghcjs-8.10.7-ghc8_10_7
+Private executables installed in:
+/nix/store/isv2pqfbanv9lf4svbdz88pwf3djkrkv-frontend-0.1.0.0/libexec/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Data files installed in:
+/nix/store/isv2pqfbanv9lf4svbdz88pwf3djkrkv-frontend-0.1.0.0/share/js-ghcjs-ghcjs-8.10.7-ghc8_10_7/frontend-0.1.0.0
+Documentation installed in:
+/nix/store/1ka9wxv9hx9pdk6v6g8ll8d4cc637il1-frontend-0.1.0.0-doc/share/doc/frontend-0.1.0.0
+Configuration files installed in:
+/nix/store/isv2pqfbanv9lf4svbdz88pwf3djkrkv-frontend-0.1.0.0/etc
+No alex found
+Using ar found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ar
+No c2hs found
+No cpphs found
+No doctest found
+Using gcc version 11.3.0 given by user at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/cc
+Using ghc version 8.10.7 given by user at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghc-pkg version 8.10.7 given by user at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/ghc-pkg
+Using ghcjs version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs
+Using ghcjs-pkg version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/ghcjs-pkg
+No greencard found
+Using haddock version 8.10.7 found on system at:
+/nix/store/yjbynw24njpwg989pvdbjwwnzl7sq5il-ghcjs-8.10.7/bin/haddock
+No happy found
+Using haskell-suite found on system at: haskell-suite-dummy-location
+Using haskell-suite-pkg found on system at: haskell-suite-pkg-dummy-location
+No hmake found
+Using hpc version 0.68 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hpc
+Using hsc2hs version 0.68.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/hsc2hs
+No hscolour found
+No jhc found
+Using ld found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/ld
+No pkg-config found
+Using runghc version 8.10.7 found on system at:
+/nix/store/kyjhniqxzp5pa38q779wm964wmxcm53l-ghc-8.10.7/bin/runghc
+Using strip version 2.38 found on system at:
+/nix/store/k6yka69n28j47wjhm14h41r2kbv262y6-gcc-wrapper-11.3.0/bin/strip
+Using tar found on system at:
+/nix/store/f4ja1s5wxs2fxvcyz6kaaqj75icjfrrm-gnutar-1.34/bin/tar
+No uhc found
+building
+Preprocessing executable 'frontend' for frontend-0.1.0.0..
+Building executable 'frontend' for frontend-0.1.0.0..
+[1 of 1] Compiling Main             ( src/Main.hs, dist/build/frontend/frontend-tmp/Main.js_o )
+
+src/Main.hs:92:20: error:
+    • Could not deduce: m ~ Dynamic t
+      from the context: (DomBuilder t m, Prerender t m,
+                         MonadIO (Performable m), PostBuild t m, MonadHold t m, MonadFix m)
+        bound by the type signature for:
+                   handleDragEvents :: forall t (m :: * -> *).
+                                       (DomBuilder t m, Prerender t m, MonadIO (Performable m),
+                                        PostBuild t m, MonadHold t m, MonadFix m) =>
+                                       m (Dynamic t Text)
+        at src/Main.hs:(83,1)-(91,20)
+      ‘m’ is a rigid type variable bound by
+        the type signature for:
+          handleDragEvents :: forall t (m :: * -> *).
+                              (DomBuilder t m, Prerender t m, MonadIO (Performable m),
+                               PostBuild t m, MonadHold t m, MonadFix m) =>
+                              m (Dynamic t Text)
+        at src/Main.hs:(83,1)-(91,20)
+      Expected type: Client (Dynamic t) (Dynamic t Text)
+                     -> m (Dynamic t Text)
+        Actual type: Client (Dynamic t) (Dynamic t Text)
+                     -> Dynamic t (Dynamic t Text)
+    • The first argument of ($) takes one argument,
+      its type is ‘f0 b0’,
+      it is specialized to ‘Client (Dynamic t) (Dynamic t Text)
+                            -> Dynamic t (Dynamic t Text)’
+      In the expression:
+        join <$> prerender (return $ constDyn "")
+          $ do let ddEvent ::
+                     (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                     -> DOM.EventM e DOM.MouseEvent a
+                   ddEvent op = ...
+                   ....
+               rec dragEnterEvent <- wrapDomEvent
+                                       dsHTMLel (`DOM.on` DOM.dragEnter)
+                                       (ddEvent_ DOM.preventDefault)
+                   performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                   dragLeaveEvent <- wrapDomEvent
+                                       dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+                   ....
+               return logDyn
+      In an equation for ‘handleDragEvents’:
+          handleDragEvents
+            = join <$> prerender (return $ constDyn "")
+                $ do let ddEvent ::
+                           (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+                           -> DOM.EventM e DOM.MouseEvent a
+                         ....
+                     rec dragEnterEvent <- wrapDomEvent
+                                             dsHTMLel (`DOM.on` DOM.dragEnter)
+                                             (ddEvent_ DOM.preventDefault)
+                         performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+                         ....
+                     return logDyn
+    • Relevant bindings include
+        handleDragEvents :: m (Dynamic t Text) (bound at src/Main.hs:92:1)
+   |
+92 | handleDragEvents = join <$> prerender (return $ constDyn "") $ do
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+
+error: builder for '/nix/store/hrprg6iybnpr1pivrncc9j7j19c3rykd-frontend-0.1.0.0.drv' failed with exit code 1;
+       last 25 log lines:
+       >                                        (ddEvent_ DOM.preventDefault)
+       >                    performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                    dragLeaveEvent <- wrapDomEvent
+       >                                        dsHTMLel (`DOM.on` DOM.dragLeave) (ddEvent_ $ return ())
+       >                    ....
+       >                return logDyn
+       >       In an equation for ‘handleDragEvents’:
+       >           handleDragEvents
+       >             = join <$> prerender (return $ constDyn "")
+       >                 $ do let ddEvent ::
+       >                            (DOM.DataTransfer -> DOM.EventM e DOM.MouseEvent a)
+       >                            -> DOM.EventM e DOM.MouseEvent a
+       >                          ....
+       >                      rec dragEnterEvent <- wrapDomEvent
+       >                                              dsHTMLel (`DOM.on` DOM.dragEnter)
+       >                                              (ddEvent_ DOM.preventDefault)
+       >                          performEvent_ $ liftIO (putStrLn "Drag enter") <$ dragEnterEvent
+       >                          ....
+       >                      return logDyn
+       >     • Relevant bindings include
+       >         handleDragEvents :: m (Dynamic t Text) (bound at src/Main.hs:92:1)
+       >    |
+       > 92 | handleDragEvents = join <$> prerender (return $ constDyn "") $ do
+       >    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+       > 
+       For full logs, run 'nix log /nix/store/hrprg6iybnpr1pivrncc9j7j19c3rykd-frontend-0.1.0.0.drv'.
+
+2024-07-23 00:48:45.869535 - Error: Error code: 429 - {'error': {'message': 'Request too large for gpt-4o in organization org-RJC3zLlzghikxw7c2d2SQCin on tokens per min (TPM): Limit 30000, Requested 30767. The input or output tokens must be reduced in order to run successfully. Visit https://platform.openai.com/account/rate-limits to learn more.', 'type': 'tokens', 'param': None, 'code': 'rate_limit_exceeded'}}

@@ -1,0 +1,266 @@
+Search Terms: logging error log console
+Result 1:
+Chunk index: 275
+Distance: 1.4447617530822754
+Code Chunk:
+import Data.Reflection
+import Data.Some (Some(Some))
+import Data.Type.Coercion
+import Data.Profunctor.Unsafe ((#.), (.#))
+import Data.WeakBag (WeakBag, WeakBagTicket, _weakBag_children)
+import qualified Data.WeakBag as WeakBag
+import qualified Reflex.Class
+import qualified Reflex.Class as R
+import qualified Reflex.Host.Class
+import Reflex.NotReady.Class
+import Data.Patch
+import qualified Data.Patch.DMapWithMove as PatchDMapWithMove
+import Reflex.PerformEvent.Base (PerformEventT)
+
+#ifdef DEBUG_TRACE_EVENTS
+import qualified Data.ByteString.Char8 as BS8
+import System.IO (stderr)
+import Data.List (isPrefixOf)
+#endif
+
+-- TODO stdout might not be the best channel for debug output
+debugStrLn :: String -> IO ()
+debugStrLn = putStrLn
+
+#ifdef DEBUG_TRACE_EVENTS
+withStackOneLine :: (BS8.ByteString -> a) -> a
+withStackOneLine expr = unsafePerformIO $ do
+  stack <- currentCallStack
+  return (expr . BS8.pack  . unwords . dropInternal . reverse $ stack)
+    where dropInternal = filterStack "Reflex.Spider.Internal"
+
+#endif
+
+debugPropagate :: Bool
+
+debugInvalidateHeight :: Bool
+
+debugInvalidate :: Bool
+
+#ifdef DEBUG
+#define DEBUG_NODEIDS
+
+#ifdef DEBUG_TRACE_PROPAGATION
+debugPropagate = True
+#else
+debugPropagate = False
+#endif
+
+#ifdef DEBUG_TRACE_HEIGHT
+debugInvalidateHeight = True
+#else
+debugInvalidateHeight = False
+#endif
+
+#ifdef DEBUG_TRACE_INVALIDATION
+debugInvalidate = True
+#else
+debugInvalidate = False
+#endif
+
+class HasNodeId a where
+  getNodeId :: a -> Int
+
+instance HasNodeId (CacheSubscribed x a) where
+  getNodeId = _cacheSubscribed_nodeId
+
+instance HasNodeId (FanInt x a) where
+  getNodeId = _fanInt_nodeId
+
+instance HasNodeId (Hold x p) where
+  getNodeId = holdNodeId
+
+instance HasNodeId (SwitchSubscribed x a) where
+  getNodeId = switchSubscribedNodeId
+
+instance HasNodeId (FanSubscribed x v a) where
+  getNodeId = fanSubscribedNodeId
+
+instance HasNodeId (CoincidenceSubscribed x a) where
+  getNodeId = coincidenceSubscribedNodeId
+
+instance HasNodeId (RootSubscribed x a) where
+  getNodeId = rootSubscribedNodeId
+
+instance HasNodeId (Pull x a) where
+  getNodeId = pullNodeId
+
+{-# INLINE showNodeId #-}
+showNodeId :: HasNodeId a => a -> String
+showNodeId = showNodeId' . getNodeId
+
+showNodeId' :: Int -> String
+showNodeId' = ("#"<>) . show
+
+
+#else
+
+debugPropagate = False
+debugInvalidateHeight = False
+debugInvalidate = False
+--------------------------------------------------------------------------------
+Result 2:
+Chunk index: 143
+Distance: 1.4510825872421265
+Code Chunk:
+    putStrLnDebug "sent response"
+    return r
+  waitJSaddle <- liftIO newEmptyMVar
+  let settings = foldr ($) Warp.defaultSettings
+        [ Warp.setPort $ fromIntegral $ toInteger jsaddlePort
+        , Warp.setBeforeMainLoop $ do
+            putStrLnDebug "putting waitJSaddle"
+            putMVar waitJSaddle ()
+            putStrLnDebug "put waitJSaddle"
+        ]
+      -- hSilence to get rid of ConnectionClosed logs
+      silenceIfNotDebugging = if withDebugging then id else hSilence [stderr]
+      jsaddleWarp = silenceIfNotDebugging $ Warp.runSettings settings application
+  withAsync' jsaddleWarp $ do
+    putStrLnDebug "taking waitJSaddle"
+    liftIO $ takeMVar waitJSaddle
+    putStrLnDebug "opening page"
+    WD.openPage $ "http://localhost:" <> show jsaddlePort
+    putStrLnDebug "running beforeJS"
+    a <- beforeJS
+    putStrLnDebug "putting waitBeforeJS"
+    liftIO $ putMVar waitBeforeJS ()
+    putStrLnDebug "taking waitUntilSwitchover"
+    liftIO $ takeMVar waitUntilSwitchover
+    putStrLnDebug "running afterSwitchover"
+    afterSwitchover a
+
+--------------------------------------------------------------------------------
+-- Utilities
+--------------------------------------------------------------------------------
+
+-- | Embed a different spec type by evaluating it directly.
+embedSpec :: (Hspec.Example a, MonadIO m) => Hspec.Arg a -> a -> m ()
+embedSpec arg spec = liftIO $ do
+  Hspec.Result _info status <- Hspec.evaluateExample
+    spec
+    Hspec.defaultParams
+    (\actionWith -> actionWith arg)
+    (\_ -> pure ())
+  case status of
+    Hspec.Success -> pure ()
+    Hspec.Pending _ _ -> pure () -- should not happen
+    failure -> throwIO failure
+
+withAsync' :: (MonadIO m, MonadMask m) => IO a -> m b -> m b
+withAsync' f g = bracket
+  (liftIO $ Async.async f)
+  (liftIO . Async.uninterruptibleCancel)
+  (const g)
+
+--------------------------------------------------------------------------------
+Result 3:
+Chunk index: 288
+Distance: 1.5318461656570435
+Code Chunk:
+traceInvalidateHeight :: String -> IO ()
+traceInvalidateHeight = when debugInvalidateHeight . liftIO . debugStrLn
+
+{-# INLINE trace #-}
+trace :: (CanTrace x m) => proxy x ->  String -> m ()
+trace p message = traceM p $ return message
+
+{-# INLINE traceM #-}
+traceM :: forall x proxy m. (CanTrace x m) => proxy x -> m String -> m ()
+traceM _ getMessage = do
+  message <- getMessage
+  d <- liftIO $ readIORef $ _spiderTimeline_depth $ unSTE (spiderTimeline :: SpiderTimelineEnv x)
+  liftIO $ debugStrLn $ replicate d ' ' <> message
+
+#else
+
+{-# INLINE withIncreasedDepth #-}
+withIncreasedDepth ::  proxy x -> m a -> m a
+withIncreasedDepth _ = id
+
+{-# INLINE tracePropagate #-}
+tracePropagate :: (CanTrace x m) => proxy x -> String -> m ()
+tracePropagate _ _ = return ()
+
+{-# INLINE traceInvalidate #-}
+traceInvalidate :: String -> IO ()
+traceInvalidate _ = return ()
+
+{-# INLINE traceInvalidateHeight #-}
+traceInvalidateHeight :: String -> IO ()
+traceInvalidateHeight _ = return ()
+
+{-# INLINE debugSubscriber #-}
+debugSubscriber :: String -> Subscriber x a -> IO (Subscriber x a)
+debugSubscriber _ = return
+
+{-# INLINE debugSubscriber' #-}
+debugSubscriber' :: String -> Subscriber x a -> Subscriber x a
+debugSubscriber' _ = id
+
+
+
+{-# INLINE trace #-}
+trace :: (CanTrace x m) => proxy x ->  String -> m ()
+trace _ _ = return ()
+
+{-# INLINE traceM #-}
+traceM :: (CanTrace x m) => proxy x -> m String -> m ()
+traceM _ _ = return ()
+
+#endif
+
+whoCreatedIORef :: IORef a -> IO [String]
+whoCreatedIORef (IORef a) = whoCreated $! a
+
+groupByHead :: Eq a => [NonEmpty a] -> [(a, NonEmpty [a])]
+groupByHead = \case
+  [] -> []
+  (x :| xs) : t -> case groupByHead t of
+    [] -> [(x, xs :| [])]
+    l@((y, yss) : t')
+      | x == y -> (x, xs `NonEmpty.cons` yss) : t'
+      | otherwise -> (x, xs :| []) : l
+
+listsToForest :: Eq a => [[a]] -> Forest a
+listsToForest lists = buildForest <$> groupByHead (mapMaybe nonEmpty lists)
+    where buildForest (a, lists') = Node a $ listsToForest $ toList lists'
+
+showStacks :: [[String]] -> String
+showStacks = drawForest . listsToForest . fmap (filterStack "Reflex.Spider.Internal")
+
+filterStack :: String -> [String] -> [String]
+#ifdef DEBUG_HIDE_INTERNALS
+filterStack prefix = filter (not . (prefix `isPrefixOf`))
+#else
+filterStack prefix = id
+#endif
+
+#ifdef DEBUG_CYCLES
+
+data EventLoopException = EventLoopException [[String]]
+instance Exception EventLoopException
+
+instance Show EventLoopException where
+  show (EventLoopException stacks) = "causality loop detected:\n" <> if null stacks
+    then "no location information, compile with profiling enabled for stack tree"
+    else showStacks stacks
+
+#else
+
+data EventLoopException = EventLoopException
+instance Exception EventLoopException
+
+instance Show EventLoopException where
+  show EventLoopException = "causality loop detected: \n" <>
+    "compile reflex with flag 'debug-cycles' and compile with profiling enabled for stack tree"
+
+#endif
+
+
+--------------------------------------------------------------------------------
